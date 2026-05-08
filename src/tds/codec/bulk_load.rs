@@ -1,4 +1,5 @@
 use asynchronous_codec::BytesMut;
+use bytes::BufMut;
 use enumflags2::BitFlags;
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tracing::{event, Level};
@@ -10,7 +11,7 @@ use crate::{
 
 use super::{
     Encode, MetaDataColumn, PacketHeader, PacketStatus, TokenColMetaData, TokenDone, TokenRow,
-    TypeInfo, HEADER_BYTES,
+    TokenType, TypeInfo, HEADER_BYTES,
 };
 
 /// A handler for a bulk insert data flow.
@@ -85,6 +86,75 @@ where
         Ok(())
     }
 
+    /// Adds one already-encoded row value payload to the bulk insert.
+    ///
+    /// The payload must contain only the encoded value bytes for one row. It
+    /// must not include the TDS `ROW` token byte. This method prefixes the
+    /// normal `ROW` token (`0xD1`) and then appends the payload to the same
+    /// packet buffer used by [`send`].
+    ///
+    /// Empty payloads are rejected. After the last row, [`finalize`] must be
+    /// called to flush the buffered data and complete the bulk load.
+    ///
+    /// [`send`]: Self::send
+    /// [`finalize`]: Self::finalize
+    pub async fn send_raw_row_payload(&mut self, payload: impl AsRef<[u8]>) -> crate::Result<()> {
+        append_raw_row_payload(&mut self.buf, payload.as_ref())?;
+        self.write_packets().await?;
+
+        Ok(())
+    }
+
+    /// Adds already-encoded complete TDS rows to the bulk insert.
+    ///
+    /// The payload must contain one or more complete TDS rows. Each row must
+    /// begin with the TDS `ROW` token byte (`0xD1`) followed by that row's
+    /// encoded value payload. This is the batched raw path intended for callers
+    /// that encode many rows, such as one Arrow `RecordBatch`, before handing
+    /// bytes to Tiberius.
+    ///
+    /// Empty payloads are rejected. This method performs only a cheap first-byte
+    /// check; callers are responsible for producing semantically valid row
+    /// bytes for this request's [`columns`]. After the last batch, [`finalize`]
+    /// must be called to flush the buffered data and complete the bulk load.
+    ///
+    /// [`columns`]: Self::columns
+    /// [`finalize`]: Self::finalize
+    pub async fn send_raw_rows_payload(&mut self, payload: impl AsRef<[u8]>) -> crate::Result<()> {
+        append_raw_rows_payload(&mut self.buf, payload.as_ref())?;
+        self.write_packets().await?;
+
+        Ok(())
+    }
+
+    /// Adds already-encoded complete TDS rows with row-token offset checks.
+    ///
+    /// This method has the same byte boundary as [`send_raw_rows_payload`]:
+    /// `payload` must contain one or more complete TDS rows and each row must
+    /// start with the TDS `ROW` token byte (`0xD1`). The `row_token_offsets`
+    /// slice identifies the byte offset of every row token in `payload`.
+    ///
+    /// The offset checks are intended as a cheap validation layer for batched
+    /// encoders. They verify that offsets are non-empty, start at zero, are
+    /// strictly increasing, are in bounds, and point at `ROW` tokens. They do
+    /// not parse or validate the row value payloads.
+    ///
+    /// [`send_raw_rows_payload`]: Self::send_raw_rows_payload
+    pub async fn send_raw_rows_payload_checked(
+        &mut self,
+        payload: impl AsRef<[u8]>,
+        row_token_offsets: impl AsRef<[usize]>,
+    ) -> crate::Result<()> {
+        append_raw_rows_payload_checked(
+            &mut self.buf,
+            payload.as_ref(),
+            row_token_offsets.as_ref(),
+        )?;
+        self.write_packets().await?;
+
+        Ok(())
+    }
+
     /// Ends the bulk load, flushing all pending data to the wire.
     ///
     /// This method must be called after sending all the data to flush all
@@ -129,6 +199,97 @@ where
 
         Ok(())
     }
+}
+
+fn append_raw_row_payload(buf: &mut BytesMut, payload: &[u8]) -> crate::Result<()> {
+    if payload.is_empty() {
+        return Err(crate::Error::BulkInput(
+            "raw bulk row payload cannot be empty".into(),
+        ));
+    }
+
+    buf.put_u8(TokenType::Row as u8);
+    buf.extend_from_slice(payload);
+
+    Ok(())
+}
+
+fn append_raw_rows_payload(buf: &mut BytesMut, payload: &[u8]) -> crate::Result<()> {
+    if payload.is_empty() {
+        return Err(crate::Error::BulkInput(
+            "raw bulk rows payload cannot be empty".into(),
+        ));
+    }
+
+    if payload[0] != TokenType::Row as u8 {
+        return Err(crate::Error::BulkInput(
+            "raw bulk rows payload must start with a TDS ROW token".into(),
+        ));
+    }
+
+    buf.extend_from_slice(payload);
+
+    Ok(())
+}
+
+fn append_raw_rows_payload_checked(
+    buf: &mut BytesMut,
+    payload: &[u8],
+    row_token_offsets: &[usize],
+) -> crate::Result<()> {
+    validate_raw_row_token_offsets(payload, row_token_offsets)?;
+    buf.extend_from_slice(payload);
+
+    Ok(())
+}
+
+fn validate_raw_row_token_offsets(
+    payload: &[u8],
+    row_token_offsets: &[usize],
+) -> crate::Result<()> {
+    if payload.is_empty() {
+        return Err(crate::Error::BulkInput(
+            "raw bulk rows payload cannot be empty".into(),
+        ));
+    }
+
+    if row_token_offsets.is_empty() {
+        return Err(crate::Error::BulkInput(
+            "raw bulk row token offsets cannot be empty".into(),
+        ));
+    }
+
+    if row_token_offsets[0] != 0 {
+        return Err(crate::Error::BulkInput(
+            "raw bulk row token offsets must start at zero".into(),
+        ));
+    }
+
+    let mut previous = None;
+
+    for &offset in row_token_offsets {
+        if offset >= payload.len() {
+            return Err(crate::Error::BulkInput(
+                "raw bulk row token offset is out of bounds".into(),
+            ));
+        }
+
+        if previous.is_some_and(|previous| offset <= previous) {
+            return Err(crate::Error::BulkInput(
+                "raw bulk row token offsets must be strictly increasing".into(),
+            ));
+        }
+
+        if payload[offset] != TokenType::Row as u8 {
+            return Err(crate::Error::BulkInput(
+                "raw bulk row token offset must point to a TDS ROW token".into(),
+            ));
+        }
+
+        previous = Some(offset);
+    }
+
+    Ok(())
 }
 
 /// Read-only destination metadata for one bulk-load column.
@@ -204,5 +365,113 @@ mod tests {
         assert!(column.is_updateable());
         assert!(column.flags().contains(ColumnFlag::Nullable));
         assert_eq!(&TypeInfo::FixedLen(FixedLenType::Int4), column.type_info());
+    }
+
+    #[test]
+    fn appends_single_raw_row_payload_with_row_token() {
+        let mut buf = BytesMut::new();
+
+        append_raw_row_payload(&mut buf, &[0x01, 0x02, 0x03]).expect("payload should append");
+
+        assert_eq!(&[TokenType::Row as u8, 0x01, 0x02, 0x03], &buf[..]);
+    }
+
+    #[test]
+    fn rejects_empty_single_raw_row_payload() {
+        let mut buf = BytesMut::new();
+
+        append_raw_row_payload(&mut buf, &[]).expect_err("empty payload should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn appends_batched_raw_rows_payload_unchanged() {
+        let mut buf = BytesMut::new();
+        let payload = [TokenType::Row as u8, 0x01, TokenType::Row as u8, 0x02, 0x03];
+
+        append_raw_rows_payload(&mut buf, &payload).expect("payload should append");
+
+        assert_eq!(&payload, &buf[..]);
+    }
+
+    #[test]
+    fn rejects_empty_batched_raw_rows_payload() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_payload(&mut buf, &[]).expect_err("empty payload should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn rejects_batched_raw_rows_payload_without_row_token() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_payload(&mut buf, &[0x01, 0x02])
+            .expect_err("payload without row token should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn appends_checked_batched_raw_rows_payload_unchanged() {
+        let mut buf = BytesMut::new();
+        let payload = [TokenType::Row as u8, 0x01, TokenType::Row as u8, 0x02, 0x03];
+
+        append_raw_rows_payload_checked(&mut buf, &payload, &[0, 2])
+            .expect("payload should append");
+
+        assert_eq!(&payload, &buf[..]);
+    }
+
+    #[test]
+    fn rejects_checked_batched_raw_rows_payload_with_empty_offsets() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_payload_checked(&mut buf, &[TokenType::Row as u8], &[])
+            .expect_err("empty offsets should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn rejects_checked_batched_raw_rows_payload_with_nonzero_first_offset() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_payload_checked(&mut buf, &[0x00, TokenType::Row as u8], &[1])
+            .expect_err("nonzero first offset should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn rejects_checked_batched_raw_rows_payload_with_out_of_bounds_offset() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_payload_checked(&mut buf, &[TokenType::Row as u8], &[0, 1])
+            .expect_err("out of bounds offset should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn rejects_checked_batched_raw_rows_payload_with_non_increasing_offsets() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_payload_checked(&mut buf, &[TokenType::Row as u8, 0x01], &[0, 0])
+            .expect_err("repeated offset should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn rejects_checked_batched_raw_rows_payload_with_offset_not_on_row_token() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_payload_checked(&mut buf, &[TokenType::Row as u8, 0x01, 0x02], &[0, 1])
+            .expect_err("offset not on row token should fail");
+
+        assert!(buf.is_empty());
     }
 }
