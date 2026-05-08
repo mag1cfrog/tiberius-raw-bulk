@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -79,4 +80,22 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
     }
 
     let _type_check = inspect_request as fn(&BulkLoadRequest<'_, ExternalStream>);
+}
+
+#[test]
+fn external_crate_can_call_raw_row_apis() {
+    fn send_raw<'a>(
+        req: &'a mut BulkLoadRequest<'a, ExternalStream>,
+    ) -> impl Future<Output = tiberius::Result<()>> + 'a {
+        async move {
+            req.send_raw_row_payload([0x01, 0x02]).await?;
+            req.send_raw_rows_payload([0xD1, 0x01, 0xD1, 0x02]).await?;
+            req.send_raw_rows_payload_checked([0xD1, 0x01, 0xD1, 0x02], [0, 2])
+                .await?;
+
+            Ok(())
+        }
+    }
+
+    let _type_check = send_raw;
 }
