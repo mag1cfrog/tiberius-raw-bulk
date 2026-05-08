@@ -1,5 +1,12 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.1
+
+- Rename the Cargo package to `tiberius-raw-bulk`.
+- Keep the Rust library crate name as `tiberius` for downstream compatibility.
+- Add fork attribution and maintenance notes.
+- No runtime behavior changes from upstream Tiberius 0.12.3.
+
 ## Version 0.12.3
 - feat: improve column type accuracy (#347)
 - fix: encoding of zero-length values for large varlen columns (#315)

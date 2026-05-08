@@ -1,10 +1,23 @@
-# Tiberius
-[![crates.io](https://meritbadge.herokuapp.com/tiberius)](https://crates.io/crates/tiberius)
-[![docs.rs](https://docs.rs/tiberius/badge.svg)](https://docs.rs/tiberius)
-[![Cargo tests](https://github.com/prisma/tiberius/actions/workflows/test.yml/badge.svg)](https://github.com/prisma/tiberius/actions/workflows/test.yml)
-[![Chat](https://img.shields.io/discord/664092374359605268)](https://discord.gg/xX4xp9x)
+# tiberius-raw-bulk
+[![crates.io](https://img.shields.io/crates/v/tiberius-raw-bulk.svg)](https://crates.io/crates/tiberius-raw-bulk)
+[![docs.rs](https://docs.rs/tiberius-raw-bulk/badge.svg)](https://docs.rs/tiberius-raw-bulk)
 
 A native Microsoft SQL Server (TDS) client for Rust.
+
+`tiberius-raw-bulk` is a minimal fork of
+[`prisma/tiberius`](https://github.com/prisma/tiberius). It keeps the Rust
+library crate name as `tiberius` while publishing under a distinct Cargo package
+name:
+
+```toml
+tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.1" }
+```
+
+This fork exists to expose focused raw bulk-load extension points while keeping
+upstream Tiberius behavior intact. Arrow-specific planning and encoding logic
+belongs in `arrow-tiberius`, not in this fork.
+
+See [FORK.md](FORK.md) for upstream base and maintenance notes.
 
 ### Goals
 
