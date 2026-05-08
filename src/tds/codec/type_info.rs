@@ -18,20 +18,31 @@ pub enum TypeLength {
 /// Describes a type of a column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeInfo {
+    /// A fixed-length TDS type.
     FixedLen(FixedLenType),
+    /// A variable-length TDS type with optional collation metadata.
     VarLenSized(VarLenContext),
+    /// A variable-length TDS type that also carries precision and scale.
     VarLenSizedPrecision {
+        /// The variable-length TDS type tag.
         ty: VarLenType,
+        /// The storage size in bytes.
         size: usize,
+        /// Numeric precision.
         precision: u8,
+        /// Numeric scale.
         scale: u8,
     },
+    /// XML metadata.
     Xml {
+        /// Optional XML schema metadata.
         schema: Option<Arc<XmlSchema>>,
+        /// The XML type size marker.
         size: usize,
     },
 }
 
+/// Detailed metadata for a variable-length TDS type.
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub struct VarLenContext {
     r#type: VarLenType,
@@ -40,6 +51,7 @@ pub struct VarLenContext {
 }
 
 impl VarLenContext {
+    /// Creates a variable-length type context.
     pub fn new(r#type: VarLenType, len: usize, collation: Option<Collation>) -> Self {
         Self {
             r#type,
