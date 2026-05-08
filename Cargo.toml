@@ -5,15 +5,18 @@ authors = [
     "Eric Sheppard <eric@eigenmo.de>",
     "Yoshua Wuyts <yoshuawuyts@gmail.com>",
 ]
-description = "A TDS (MSSQL) driver"
-documentation = "https://docs.rs/tiberius/"
+description = "A minimal Tiberius fork with raw bulk-load extension support"
+documentation = "https://docs.rs/tiberius-raw-bulk/"
 edition = "2021"
 keywords = ["tds", "mssql", "sql"]
 license = "MIT/Apache-2.0"
-name = "tiberius"
+name = "tiberius-raw-bulk"
 readme = "README.md"
-repository = "https://github.com/prisma/tiberius"
-version = "0.12.3"
+repository = "https://github.com/mag1cfrog/tiberius-raw-bulk"
+version = "0.12.3-raw-bulk.1"
+
+[lib]
+name = "tiberius"
 
 [workspace]
 members = ["runtimes-macro"]
