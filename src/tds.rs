@@ -6,7 +6,7 @@ pub mod stream;
 pub mod time;
 pub mod xml;
 
-pub(crate) use collation::*;
+pub use collation::Collation;
 pub(crate) use context::*;
 pub(crate) use numeric::*;
 

@@ -11,6 +11,7 @@ use std::fmt;
 
 use crate::error::Error;
 
+/// SQL Server collation metadata attached to character columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Collation {
     /// LCID ColFlags Version
@@ -20,6 +21,7 @@ pub struct Collation {
 }
 
 impl Collation {
+    /// Creates collation metadata from the raw TDS collation parts.
     pub fn new(info: u32, sort_id: u8) -> Self {
         Self { info, sort_id }
     }
@@ -29,10 +31,12 @@ impl Collation {
         (self.info & 0xffff) as u16
     }
 
+    /// The SQL Server sort ID.
     pub fn sort_id(&self) -> u8 {
         self.sort_id
     }
 
+    /// The raw LCID, flags, and version bits.
     pub fn info(&self) -> u32 {
         self.info
     }
