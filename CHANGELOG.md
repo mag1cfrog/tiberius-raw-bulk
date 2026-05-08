@@ -5,7 +5,12 @@
 - Rename the Cargo package to `tiberius-raw-bulk`.
 - Keep the Rust library crate name as `tiberius` for downstream compatibility.
 - Add fork attribution and maintenance notes.
-- No runtime behavior changes from upstream Tiberius 0.12.3.
+- Expose read-only bulk-load destination metadata through `BulkLoadRequest::columns()`.
+- Add raw bulk row send APIs:
+  - `BulkLoadRequest::send_raw_row_payload()`;
+  - `BulkLoadRequest::send_raw_rows_payload()`;
+  - `BulkLoadRequest::send_raw_rows_payload_checked()`.
+- Keep upstream Tiberius 0.12.3 behavior unchanged outside the raw bulk-load extension points.
 
 ## Version 0.12.3
 - feat: improve column type accuracy (#347)
