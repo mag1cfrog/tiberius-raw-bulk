@@ -1,5 +1,11 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.2
+
+- Relax `Client::bulk_insert` table-name borrowing so callers can pass a
+  locally formatted table SQL string without extending it to the returned
+  `BulkLoadRequest` lifetime.
+
 ## Version 0.12.3-raw-bulk.1
 
 - Rename the Cargo package to `tiberius-raw-bulk`.

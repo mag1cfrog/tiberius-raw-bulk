@@ -6,7 +6,8 @@ use std::{
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tiberius::{
-    BulkLoadColumn, BulkLoadRequest, ColumnFlag, ColumnType, FixedLenType, TypeInfo, VarLenType,
+    BulkLoadColumn, BulkLoadRequest, Client, ColumnFlag, ColumnType, FixedLenType, TypeInfo,
+    VarLenType,
 };
 
 struct ExternalStream;
@@ -80,6 +81,20 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
     }
 
     let _type_check = inspect_request as fn(&BulkLoadRequest<'_, ExternalStream>);
+}
+
+#[test]
+fn bulk_insert_accepts_table_string_shorter_than_request_lifetime() {
+    async fn start_bulk_with_formatted_table<'client>(
+        client: &'client mut Client<ExternalStream>,
+        table_name: &str,
+    ) -> tiberius::Result<BulkLoadRequest<'client, ExternalStream>> {
+        let table_sql = format!("[dbo].[{table_name}]");
+
+        client.bulk_insert(&table_sql).await
+    }
+
+    let _ = start_bulk_with_formatted_table;
 }
 
 #[test]
