@@ -26,6 +26,11 @@ path = "tests/query.rs"
 name = "query"
 
 [[test]]
+path = "tests/bulk_temporal.rs"
+name = "bulk_temporal"
+required-features = ["tds73"]
+
+[[test]]
 path = "tests/named-instance-async.rs"
 name = "named-instance-async"
 required-features = ["sql-browser-async-std"]
