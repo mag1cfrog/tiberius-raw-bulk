@@ -23,10 +23,9 @@ connection behavior, token handling, query behavior, and runtime support should
 continue to follow upstream unless a raw bulk-load extension requires a focused
 change.
 
-Arrow-specific planning, encoding, policy, and validation logic does not belong
-in this repository. That logic belongs in `arrow-tiberius`; this fork should
-stay useful as a Tiberius-compatible client package with minimal raw bulk-load
-support.
+Application-specific planning, encoding, policy, and validation logic does not
+belong in this repository. This fork should stay useful as a
+Tiberius-compatible client package with minimal raw bulk-load support.
 
 ## Package Shape
 
@@ -34,7 +33,7 @@ The crates.io package is named `tiberius-raw-bulk`, but the Rust library crate
 is intentionally still named `tiberius`:
 
 ```toml
-tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.1" }
+tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.3" }
 ```
 
 That lets downstream code continue importing `tiberius::Client` while selecting

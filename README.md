@@ -10,12 +10,12 @@ library crate name as `tiberius` while publishing under a distinct Cargo package
 name:
 
 ```toml
-tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.2" }
+tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.3" }
 ```
 
 This fork exists to expose focused raw bulk-load extension points while keeping
-upstream Tiberius behavior intact. Arrow-specific planning and encoding logic
-belongs in `arrow-tiberius`, not in this fork.
+upstream Tiberius behavior intact. Application-specific planning and encoding
+logic belongs in downstream crates, not in this fork.
 
 See [FORK.md](FORK.md) for upstream base and maintenance notes.
 

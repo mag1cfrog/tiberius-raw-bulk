@@ -1,4 +1,5 @@
 use futures_util::io::{AsyncRead, AsyncWrite};
+use futures_util::stream::TryStreamExt;
 use names::{Generator, Name};
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
@@ -113,6 +114,77 @@ test_bulk_type!(tinyint("TINYINT", 256, 0..=255u8));
 test_bulk_type!(smallint("SMALLINT", 2000, 0..2000i16));
 test_bulk_type!(int("INT", 2000, 0..2000i32));
 test_bulk_type!(bigint("BIGINT", 2000, 0..2000i64));
+
+#[test_on_runtimes]
+async fn bulk_insert_columns_does_not_start_bulk_flow<S>(
+    mut conn: tiberius::Client<S>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let table = format!("##{}", random_table().await);
+
+    conn.execute(
+        &format!("CREATE TABLE {table} (id INT IDENTITY PRIMARY KEY, content INT NOT NULL)"),
+        &[],
+    )
+    .await?;
+
+    let columns = conn.bulk_insert_columns(&table).await?;
+
+    assert_eq!(1, columns.len());
+    assert_eq!("content", columns.iter().next().unwrap().name());
+
+    let row = conn
+        .query("SELECT 42", &[])
+        .await?
+        .into_row()
+        .await?
+        .unwrap();
+
+    assert_eq!(Some(42i32), row.get(0));
+
+    Ok(())
+}
+
+#[test_on_runtimes]
+async fn bulk_insert_with_columns_sends_rows<S>(mut conn: tiberius::Client<S>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let table = format!("##{}", random_table().await);
+
+    conn.execute(
+        &format!("CREATE TABLE {table} (id INT IDENTITY PRIMARY KEY, content INT NOT NULL)"),
+        &[],
+    )
+    .await?;
+
+    let columns = conn.bulk_insert_columns(&table).await?;
+    let mut req = conn.bulk_insert_with_columns(&table, columns).await?;
+
+    for value in [7i32, 11i32] {
+        let mut row = TokenRow::new();
+        row.push(value.into_sql());
+        req.send(row).await?;
+    }
+
+    let res = req.finalize().await?;
+
+    assert_eq!(2, res.total());
+
+    let values: Vec<i32> = conn
+        .query(format!("SELECT content FROM {table} ORDER BY id"), &[])
+        .await?
+        .try_filter_map(|item| async move { Ok(item.into_row()) })
+        .map_ok(|row| row.get::<i32, _>(0).unwrap())
+        .try_collect()
+        .await?;
+
+    assert_eq!(vec![7, 11], values);
+
+    Ok(())
+}
 
 test_bulk_type!(empty_varchar(
     "VARCHAR(MAX)",

@@ -1,5 +1,20 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.3
+
+- Fix bulk-load metadata for TDS 7.3 temporal types:
+  - encode `date` type metadata without an invalid type-length byte;
+  - render `time(n)` with its fractional seconds scale in `INSERT BULK`;
+  - render `datetimeoffset(n)` with its fractional seconds scale in `INSERT BULK`.
+- Add SQL Server bulk-load regression tests for `date`, `time(3)`,
+  `datetime2(3)`, and `datetimeoffset(3)` values.
+- Add side-effect-free bulk target metadata discovery:
+  - `Client::bulk_insert_columns()`;
+  - `Client::bulk_insert_with_columns()`;
+  - `BulkLoadColumns`.
+- Keep `Client::bulk_insert()` compatible by delegating through the split
+  metadata discovery and bulk-start flow.
+
 ## Version 0.12.3-raw-bulk.2
 
 - Relax `Client::bulk_insert` table-name borrowing so callers can pass a
