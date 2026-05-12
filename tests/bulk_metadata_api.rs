@@ -6,8 +6,8 @@ use std::{
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tiberius::{
-    BulkLoadColumn, BulkLoadRequest, Client, ColumnFlag, ColumnType, FixedLenType, TypeInfo,
-    VarLenType,
+    BulkLoadColumn, BulkLoadColumns, BulkLoadRequest, Client, ColumnFlag, ColumnType, FixedLenType,
+    TypeInfo, VarLenType,
 };
 
 struct ExternalStream;
@@ -42,6 +42,15 @@ impl AsyncWrite for ExternalStream {
 
 #[test]
 fn external_crate_can_name_and_inspect_bulk_metadata_api() {
+    fn inspect_columns(columns: &BulkLoadColumns<'_>) {
+        let _column_count = columns.len();
+        let _empty = columns.is_empty();
+
+        for column in columns.iter() {
+            inspect_column(column);
+        }
+    }
+
     fn inspect_request(req: &BulkLoadRequest<'_, ExternalStream>) {
         let columns = req.columns();
         let _column_count = columns.len();
@@ -80,6 +89,7 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
         }
     }
 
+    let _columns_type_check = inspect_columns as fn(&BulkLoadColumns<'_>);
     let _type_check = inspect_request as fn(&BulkLoadRequest<'_, ExternalStream>);
 }
 
@@ -95,6 +105,21 @@ fn bulk_insert_accepts_table_string_shorter_than_request_lifetime() {
     }
 
     let _ = start_bulk_with_formatted_table;
+}
+
+#[test]
+fn external_crate_can_call_split_bulk_insert_flow() {
+    async fn split_bulk<'client>(
+        client: &'client mut Client<ExternalStream>,
+        table_name: &str,
+    ) -> tiberius::Result<BulkLoadRequest<'client, ExternalStream>> {
+        let table_sql = format!("[dbo].[{table_name}]");
+        let columns = client.bulk_insert_columns(&table_sql).await?;
+
+        client.bulk_insert_with_columns(&table_sql, columns).await
+    }
+
+    let _ = split_bulk;
 }
 
 #[test]

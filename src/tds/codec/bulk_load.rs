@@ -14,6 +14,37 @@ use super::{
     TokenType, TypeInfo, HEADER_BYTES,
 };
 
+/// Owned destination metadata for a bulk-load request.
+#[derive(Debug, Clone)]
+pub struct BulkLoadColumns<'a> {
+    columns: Vec<MetaDataColumn<'a>>,
+}
+
+impl<'a> BulkLoadColumns<'a> {
+    pub(crate) fn new(columns: Vec<MetaDataColumn<'a>>) -> Self {
+        Self { columns }
+    }
+
+    pub(crate) fn into_inner(self) -> Vec<MetaDataColumn<'a>> {
+        self.columns
+    }
+
+    /// The number of destination columns in the bulk row encoding order.
+    pub fn len(&self) -> usize {
+        self.columns.len()
+    }
+
+    /// Whether there are no destination columns.
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// Returns the destination columns in bulk row encoding order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = BulkLoadColumn<'_>> {
+        bulk_load_columns(&self.columns)
+    }
+}
+
 /// A handler for a bulk insert data flow.
 #[derive(Debug)]
 pub struct BulkLoadRequest<'a, S>
@@ -63,10 +94,7 @@ where
     /// [`send`]: Self::send
     /// [`Client::bulk_insert`]: crate::Client::bulk_insert
     pub fn columns(&self) -> impl ExactSizeIterator<Item = BulkLoadColumn<'_>> {
-        self.columns
-            .iter()
-            .enumerate()
-            .map(|(ordinal, column)| BulkLoadColumn { ordinal, column })
+        bulk_load_columns(&self.columns)
     }
 
     /// Adds a new row to the bulk insert, flushing only when having a full packet of data.
@@ -199,6 +227,15 @@ where
 
         Ok(())
     }
+}
+
+fn bulk_load_columns<'a>(
+    columns: &'a [MetaDataColumn<'a>],
+) -> impl ExactSizeIterator<Item = BulkLoadColumn<'a>> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(ordinal, column)| BulkLoadColumn { ordinal, column })
 }
 
 fn append_raw_row_payload(buf: &mut BytesMut, payload: &[u8]) -> crate::Result<()> {

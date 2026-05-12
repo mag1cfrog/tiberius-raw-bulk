@@ -21,7 +21,7 @@ use crate::{
         codec::{self, IteratorJoin},
         stream::{QueryStream, TokenStream},
     },
-    BulkLoadRequest, ColumnFlag, SqlReadBytes, ToSql,
+    BulkLoadColumns, BulkLoadRequest, ColumnFlag, SqlReadBytes, ToSql,
 };
 use codec::{BatchRequest, ColumnData, PacketHeader, RpcParam, RpcProcId, TokenRpcRequest};
 use enumflags2::BitFlags;
@@ -300,10 +300,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         &'a mut self,
         table: &str,
     ) -> crate::Result<BulkLoadRequest<'a, S>> {
-        // Start the bulk request
+        let columns = self.bulk_insert_columns(table).await?;
+        self.bulk_insert_with_columns(table, columns).await
+    }
+
+    /// Returns updateable target column metadata for a future bulk insert.
+    ///
+    /// This method only sends a metadata query. It does not start the
+    /// `INSERT BULK` protocol flow, so callers can validate the target table
+    /// and fail without needing to finalize an empty bulk-load request.
+    pub async fn bulk_insert_columns(
+        &mut self,
+        table: &str,
+    ) -> crate::Result<BulkLoadColumns<'static>> {
         self.connection.flush_stream().await?;
 
-        // retrieve column metadata from server
         let query = format!("SELECT TOP 0 * FROM {}", table);
 
         let req = BatchRequest::new(query, self.connection.context().transaction_descriptor());
@@ -331,6 +342,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
             .into_iter()
             .filter(|column| column.base.flags.contains(ColumnFlag::Updateable))
             .collect();
+
+        Ok(BulkLoadColumns::new(columns))
+    }
+
+    /// Starts a bulk insert using previously discovered target columns.
+    pub async fn bulk_insert_with_columns<'a>(
+        &'a mut self,
+        table: &str,
+        columns: BulkLoadColumns<'a>,
+    ) -> crate::Result<BulkLoadRequest<'a, S>> {
+        let columns = columns.into_inner();
 
         self.connection.flush_stream().await?;
         let col_data = columns.iter().map(|c| format!("{}", c)).join(", ");
