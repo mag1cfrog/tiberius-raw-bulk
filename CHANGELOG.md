@@ -1,5 +1,15 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.6
+
+- Add configurable TDS login packet size support:
+  - `Config::packet_size()`;
+  - ADO.NET and JDBC connection-string keys `Packet Size`, `PacketSize`, and
+    `packet_size`.
+- Keep the default requested packet size unchanged at `4096`.
+- Continue using SQL Server's negotiated packet size for runtime packet
+  splitting.
+
 ## Version 0.12.3-raw-bulk.5
 
 - Add low-overhead bulk-load packet write statistics:

@@ -484,4 +484,53 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn packet_size_parsing() -> crate::Result<()> {
+        let test_str = "Packet Size=32767";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert_eq!(Some(32767), ado.packet_size()?);
+
+        let test_str = "PacketSize=16384";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert_eq!(Some(16384), ado.packet_size()?);
+
+        let test_str = "packet_size=8192";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert_eq!(Some(8192), ado.packet_size()?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn packet_size_parsing_missing() -> crate::Result<()> {
+        let test_str = "Something=foo;";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert_eq!(None, ado.packet_size()?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn packet_size_parsing_rejects_non_numeric_value() -> crate::Result<()> {
+        let test_str = "Packet Size=large";
+        let ado: AdoNetConfig = test_str.parse()?;
+
+        assert!(ado.packet_size().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_ado_string_applies_packet_size() -> crate::Result<()> {
+        let config = crate::client::Config::from_ado_string("server=localhost;Packet Size=32767")?;
+
+        assert_eq!(Some(32767), config.packet_size);
+
+        Ok(())
+    }
 }

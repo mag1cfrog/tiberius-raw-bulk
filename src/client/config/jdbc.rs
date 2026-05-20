@@ -333,4 +333,55 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn packet_size_parsing() -> crate::Result<()> {
+        let test_str = "jdbc:sqlserver://my-server.com:4200;Packet Size=32767";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert_eq!(Some(32767), jdbc.packet_size()?);
+
+        let test_str = "jdbc:sqlserver://my-server.com:4200;PacketSize=16384";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert_eq!(Some(16384), jdbc.packet_size()?);
+
+        let test_str = "jdbc:sqlserver://my-server.com:4200;packet_size=8192";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert_eq!(Some(8192), jdbc.packet_size()?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn packet_size_parsing_missing() -> crate::Result<()> {
+        let test_str = "jdbc:sqlserver://my-server.com:4200;";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert_eq!(None, jdbc.packet_size()?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn packet_size_parsing_rejects_non_numeric_value() -> crate::Result<()> {
+        let test_str = "jdbc:sqlserver://my-server.com:4200;Packet Size=large";
+        let jdbc: JdbcConfig = test_str.parse()?;
+
+        assert!(jdbc.packet_size().is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_jdbc_string_applies_packet_size() -> crate::Result<()> {
+        let config = crate::client::Config::from_jdbc_string(
+            "jdbc:sqlserver://localhost;Packet Size=32767",
+        )?;
+
+        assert_eq!(Some(32767), config.packet_size);
+
+        Ok(())
+    }
 }
