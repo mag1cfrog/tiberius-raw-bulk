@@ -45,6 +45,67 @@ impl<'a> BulkLoadColumns<'a> {
     }
 }
 
+/// Metadata for rows appended directly into a raw bulk-load buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawRowsAppend {
+    row_token_offsets: Vec<usize>,
+}
+
+impl RawRowsAppend {
+    /// Creates appended-row metadata from row-token offsets.
+    ///
+    /// Offsets must be relative to the start of the appended byte region, not
+    /// to the start of the full bulk-load request buffer.
+    pub fn new(row_token_offsets: Vec<usize>) -> Self {
+        Self { row_token_offsets }
+    }
+
+    /// Returns row-token offsets relative to the appended byte region.
+    pub fn row_token_offsets(&self) -> &[usize] {
+        &self.row_token_offsets
+    }
+}
+
+/// Append-only access to a raw bulk-load request buffer.
+///
+/// This is a capability wrapper for [`BulkLoadRequest::send_raw_rows_with`].
+/// It lets callers append encoded row bytes directly into the request buffer
+/// without exposing `BytesMut` operations that could truncate, split, clear, or
+/// otherwise mutate bytes that existed before the append started. That keeps
+/// the method's rollback behavior well-defined when encoding or validation
+/// fails.
+#[derive(Debug)]
+pub struct RawRowsAppendBuffer<'a> {
+    bytes: &'a mut BytesMut,
+}
+
+impl RawRowsAppendBuffer<'_> {
+    /// Appends raw row bytes to the request buffer.
+    pub fn extend_from_slice(&mut self, slice: &[u8]) {
+        self.bytes.extend_from_slice(slice);
+    }
+
+    /// Appends one raw row byte to the request buffer.
+    pub fn put_u8(&mut self, value: u8) {
+        self.bytes.put_u8(value);
+    }
+
+    /// Appends a little-endian 16-bit unsigned integer.
+    pub fn put_u16_le(&mut self, value: u16) {
+        self.bytes.put_u16_le(value);
+    }
+
+    /// Appends a little-endian 32-bit unsigned integer.
+    pub fn put_u32_le(&mut self, value: u32) {
+        self.bytes.put_u32_le(value);
+    }
+
+    /// Appends a little-endian 64-bit unsigned integer.
+    pub fn put_u64_le(&mut self, value: u64) {
+        self.bytes.put_u64_le(value);
+    }
+}
+
 /// A handler for a bulk insert data flow.
 #[derive(Debug)]
 pub struct BulkLoadRequest<'a, S>
@@ -183,6 +244,30 @@ where
         Ok(())
     }
 
+    /// Adds raw rows by encoding directly into this request's packet buffer.
+    ///
+    /// The closure receives the same internal buffer used by [`send`] and the
+    /// other raw bulk methods. It must append one or more complete TDS rows,
+    /// where each row starts with the TDS `ROW` token byte (`0xD1`), and then
+    /// return [`RawRowsAppend`] with row-token offsets relative to the appended
+    /// region.
+    ///
+    /// If the closure returns an error, or if the appended region fails
+    /// row-token validation, this method truncates the request buffer back to
+    /// its original length before returning the error. On success, it uses the
+    /// normal bulk-load packet splitting path.
+    ///
+    /// [`send`]: Self::send
+    pub async fn send_raw_rows_with<F>(&mut self, encode: F) -> crate::Result<()>
+    where
+        F: FnOnce(&mut RawRowsAppendBuffer<'_>) -> crate::Result<RawRowsAppend>,
+    {
+        append_raw_rows_with(&mut self.buf, encode)?;
+        self.write_packets().await?;
+
+        Ok(())
+    }
+
     /// Ends the bulk load, flushing all pending data to the wire.
     ///
     /// This method must be called after sending all the data to flush all
@@ -276,6 +361,46 @@ fn append_raw_rows_payload_checked(
 ) -> crate::Result<()> {
     validate_raw_row_token_offsets(payload, row_token_offsets)?;
     buf.extend_from_slice(payload);
+
+    Ok(())
+}
+
+/// Runs a rollback-safe append transaction against the raw bulk request buffer.
+///
+/// `buf` is the existing `BulkLoadRequest` buffer. It may already contain
+/// column metadata, previously buffered rows, or both. The `encode` closure is
+/// responsible for appending new complete TDS rows through
+/// `RawRowsAppendBuffer`, then returning row-token offsets relative to only the
+/// bytes it appended.
+///
+/// If encoding or validation fails, this helper truncates `buf` back to the
+/// original length so the request can continue to behave as if the attempted
+/// append never happened.
+fn append_raw_rows_with<F>(buf: &mut BytesMut, encode: F) -> crate::Result<()>
+where
+    F: FnOnce(&mut RawRowsAppendBuffer<'_>) -> crate::Result<RawRowsAppend>,
+{
+    // Everything after this byte offset belongs to the attempted append.
+    let start_len = buf.len();
+    let mut raw_buf = RawRowsAppendBuffer { bytes: buf };
+
+    // The caller writes row bytes into `raw_buf` here.
+    let append = match encode(&mut raw_buf) {
+        Ok(append) => append,
+        Err(err) => {
+            raw_buf.bytes.truncate(start_len);
+            return Err(err);
+        }
+    };
+
+    // Validate only the bytes appended by this call. Returned offsets are
+    // relative to `raw_buf.bytes[start_len..]`, not the full request buffer.
+    if let Err(err) =
+        validate_raw_row_token_offsets(&raw_buf.bytes[start_len..], append.row_token_offsets())
+    {
+        raw_buf.bytes.truncate(start_len);
+        return Err(err);
+    }
 
     Ok(())
 }
@@ -460,6 +585,82 @@ mod tests {
             .expect("payload should append");
 
         assert_eq!(&payload, &buf[..]);
+    }
+
+    #[test]
+    fn appends_raw_rows_with_relative_offsets_after_existing_bytes() {
+        let mut buf = BytesMut::from(&b"prefix"[..]);
+        let payload = [TokenType::Row as u8, 0x01, TokenType::Row as u8, 0x02, 0x03];
+
+        append_raw_rows_with(&mut buf, |buf| {
+            buf.extend_from_slice(&payload);
+            Ok(RawRowsAppend::new(vec![0, 2]))
+        })
+        .expect("payload should append");
+
+        assert_eq!(&b"prefix"[..], &buf[..6]);
+        assert_eq!(&payload, &buf[6..]);
+    }
+
+    #[test]
+    fn rolls_back_raw_rows_with_closure_error() {
+        let mut buf = BytesMut::from(&b"prefix"[..]);
+
+        append_raw_rows_with(&mut buf, |buf| {
+            buf.extend_from_slice(&[TokenType::Row as u8, 0x01]);
+            Err(crate::Error::BulkInput(Cow::Borrowed(
+                "fake append failure",
+            )))
+        })
+        .expect_err("closure error should fail");
+
+        assert_eq!(&b"prefix"[..], &buf[..]);
+    }
+
+    #[test]
+    fn rolls_back_raw_rows_with_validation_error_after_append() {
+        let mut buf = BytesMut::from(&b"prefix"[..]);
+
+        append_raw_rows_with(&mut buf, |buf| {
+            buf.extend_from_slice(&[TokenType::Row as u8, 0x01]);
+            Ok(RawRowsAppend::new(vec![1]))
+        })
+        .expect_err("validation error should fail");
+
+        assert_eq!(&b"prefix"[..], &buf[..]);
+    }
+
+    #[test]
+    fn rejects_empty_raw_rows_with_append() {
+        let mut buf = BytesMut::new();
+
+        append_raw_rows_with(&mut buf, |_| Ok(RawRowsAppend::new(vec![0])))
+            .expect_err("empty append should fail");
+
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn rejects_invalid_raw_rows_with_offsets_and_rolls_back() {
+        let cases: &[(&[u8], &[usize])] = &[
+            (&[TokenType::Row as u8], &[]),
+            (&[0x00, TokenType::Row as u8], &[1]),
+            (&[TokenType::Row as u8], &[0, 1]),
+            (&[TokenType::Row as u8, 0x01], &[0, 0]),
+            (&[TokenType::Row as u8, 0x01, 0x02], &[0, 1]),
+        ];
+
+        for (payload, row_token_offsets) in cases {
+            let mut buf = BytesMut::from(&b"prefix"[..]);
+
+            append_raw_rows_with(&mut buf, |buf| {
+                buf.extend_from_slice(payload);
+                Ok(RawRowsAppend::new(row_token_offsets.to_vec()))
+            })
+            .expect_err("invalid row offsets should fail");
+
+            assert_eq!(&b"prefix"[..], &buf[..]);
+        }
     }
 
     #[test]
