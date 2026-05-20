@@ -1,5 +1,16 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.4
+
+- Add rollback-safe direct raw bulk buffer append API:
+  - `BulkLoadRequest::send_raw_rows_with()`;
+  - `RawRowsAppend`;
+  - `RawRowsAppendBuffer`.
+- Keep raw bulk packet splitting and flushing inside `BulkLoadRequest`.
+- Validate appended row-token offsets relative to the newly appended buffer
+  region.
+- Roll back appended bytes if caller encoding or row-token validation fails.
+
 ## Version 0.12.3-raw-bulk.3
 
 - Fix bulk-load metadata for TDS 7.3 temporal types:
