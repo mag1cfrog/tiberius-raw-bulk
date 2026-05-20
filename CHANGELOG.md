@@ -1,5 +1,15 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.5
+
+- Add low-overhead bulk-load packet write statistics:
+  - `BulkLoadPacketStats`;
+  - `BulkLoadRequest::packet_stats()`;
+  - `BulkLoadRequest::finalize_with_packet_stats()`.
+- Keep `BulkLoadRequest::finalize()` compatible by discarding packet stats.
+- Track packet drain calls, packet payload bytes, buffered tails, and final
+  packet payload size for downstream benchmark profiling.
+
 ## Version 0.12.3-raw-bulk.4
 
 - Add rollback-safe direct raw bulk buffer append API:

@@ -6,8 +6,8 @@ use std::{
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tiberius::{
-    BulkLoadColumn, BulkLoadColumns, BulkLoadRequest, Client, ColumnFlag, ColumnType, FixedLenType,
-    TypeInfo, VarLenType,
+    BulkLoadColumn, BulkLoadColumns, BulkLoadPacketStats, BulkLoadRequest, Client, ColumnFlag,
+    ColumnType, ExecuteResult, FixedLenType, TypeInfo, VarLenType,
 };
 
 struct ExternalStream;
@@ -54,6 +54,7 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
     fn inspect_request(req: &BulkLoadRequest<'_, ExternalStream>) {
         let columns = req.columns();
         let _column_count = columns.len();
+        let _stats: BulkLoadPacketStats = req.packet_stats();
 
         for column in columns {
             inspect_column(column);
@@ -91,6 +92,19 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
 
     let _columns_type_check = inspect_columns as fn(&BulkLoadColumns<'_>);
     let _type_check = inspect_request as fn(&BulkLoadRequest<'_, ExternalStream>);
+}
+
+#[test]
+fn external_crate_can_name_bulk_packet_stats_api() {
+    let stats = BulkLoadPacketStats::default();
+
+    let _write_calls: u64 = stats.write_packets_calls;
+    let _packets: u64 = stats.packets_written;
+    let _bytes: u64 = stats.packet_payload_bytes;
+    let _max_payload: usize = stats.max_packet_payload_bytes;
+    let _max_buffered: usize = stats.max_buffered_bytes_before_write;
+    let _tail: usize = stats.buffered_bytes_after_last_write;
+    let _final_payload: usize = stats.finalized_packet_payload_bytes;
 }
 
 #[test]
@@ -138,4 +152,15 @@ fn external_crate_can_call_raw_row_apis() {
     }
 
     let _type_check = send_raw;
+}
+
+#[test]
+fn external_crate_can_finalize_with_packet_stats() {
+    async fn finish_with_stats(
+        req: BulkLoadRequest<'_, ExternalStream>,
+    ) -> tiberius::Result<(ExecuteResult, BulkLoadPacketStats)> {
+        req.finalize_with_packet_stats().await
+    }
+
+    let _type_check = finish_with_stats;
 }
