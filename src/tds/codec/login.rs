@@ -202,6 +202,10 @@ impl<'a> LoginMessage<'a> {
         self.app_name = name.into();
     }
 
+    pub fn packet_size(&mut self, packet_size: u32) {
+        self.packet_size = packet_size;
+    }
+
     pub fn db_name(&mut self, db_name: impl Into<Cow<'a, str>>) {
         self.db_name = db_name.into();
     }
@@ -575,6 +579,30 @@ mod tests {
         let decoded = LoginMessage::decode(&mut payload).expect("decode should succeed");
 
         assert_eq!(login, decoded);
+    }
+
+    #[test]
+    fn login_message_defaults_to_4096_byte_packet_size() {
+        let mut payload = BytesMut::new();
+        LoginMessage::new()
+            .encode(&mut payload)
+            .expect("encode should succeed");
+
+        let decoded = LoginMessage::decode(&mut payload).expect("decode should succeed");
+
+        assert_eq!(decoded.packet_size, 4096);
+    }
+
+    #[test]
+    fn login_message_encodes_configured_packet_size() {
+        let mut payload = BytesMut::new();
+        let mut login = LoginMessage::new();
+        login.packet_size(32767);
+        login.encode(&mut payload).expect("encode should succeed");
+
+        let decoded = LoginMessage::decode(&mut payload).expect("decode should succeed");
+
+        assert_eq!(decoded.packet_size, 32767);
     }
 
     #[test]

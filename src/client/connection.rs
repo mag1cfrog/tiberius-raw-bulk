@@ -105,6 +105,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 config.database,
                 config.host,
                 config.application_name,
+                config.packet_size,
                 config.readonly,
                 prelogin,
             )
@@ -292,10 +293,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         db: Option<String>,
         server_name: Option<String>,
         application_name: Option<String>,
+        packet_size: Option<u32>,
         readonly: bool,
         prelogin: PreloginMessage,
     ) -> crate::Result<Self> {
         let mut login_message = LoginMessage::new();
+
+        if let Some(packet_size) = packet_size {
+            login_message.packet_size(packet_size);
+        }
 
         if let Some(db) = db {
             login_message.db_name(db);

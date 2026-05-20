@@ -28,6 +28,7 @@ pub struct Config {
     pub(crate) database: Option<String>,
     pub(crate) instance_name: Option<String>,
     pub(crate) application_name: Option<String>,
+    pub(crate) packet_size: Option<u32>,
     pub(crate) encryption: EncryptionLevel,
     pub(crate) trust: TrustConfig,
     pub(crate) auth: AuthMethod,
@@ -50,6 +51,7 @@ impl Default for Config {
             database: None,
             instance_name: None,
             application_name: None,
+            packet_size: None,
             #[cfg(any(
                 feature = "rustls",
                 feature = "native-tls",
@@ -113,6 +115,16 @@ impl Config {
     /// - Defaults to no name specified.
     pub fn application_name(&mut self, name: impl ToString) {
         self.application_name = Some(name.to_string());
+    }
+
+    /// Sets the requested TDS packet size sent in the login packet.
+    ///
+    /// SQL Server may accept a different packet size during login. Runtime
+    /// packet splitting continues to use the server-negotiated packet size.
+    ///
+    /// - Defaults to the Tiberius login default of `4096`.
+    pub fn packet_size(&mut self, packet_size: u32) {
+        self.packet_size = Some(packet_size);
     }
 
     /// Set the preferred encryption level.
