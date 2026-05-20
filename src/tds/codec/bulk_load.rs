@@ -106,6 +106,54 @@ impl RawRowsAppendBuffer<'_> {
     }
 }
 
+/// Packet-write statistics collected by a bulk-load request.
+///
+/// These counters are intended for benchmarking and diagnostics. They do not
+/// change bulk-load behavior and do not include TDS packet header bytes unless
+/// a field name explicitly says otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkLoadPacketStats {
+    /// Number of times the request attempted to drain complete packets.
+    pub write_packets_calls: u64,
+    /// Number of complete bulk-load packets written before finalization.
+    pub packets_written: u64,
+    /// Complete packet payload bytes written before finalization.
+    pub packet_payload_bytes: u64,
+    /// Largest complete packet payload written before finalization.
+    pub max_packet_payload_bytes: usize,
+    /// Largest buffered byte count observed before draining packets.
+    pub max_buffered_bytes_before_write: usize,
+    /// Buffered tail bytes left after the most recent packet drain.
+    pub buffered_bytes_after_last_write: usize,
+    /// Payload bytes written by the final `EndOfMessage` packet.
+    pub finalized_packet_payload_bytes: usize,
+}
+
+impl BulkLoadPacketStats {
+    fn record_write_packets_call(&mut self, buffered_bytes_before_write: usize) {
+        self.write_packets_calls = self.write_packets_calls.saturating_add(1);
+        self.max_buffered_bytes_before_write = self
+            .max_buffered_bytes_before_write
+            .max(buffered_bytes_before_write);
+    }
+
+    fn record_packet_written(&mut self, packet_payload_bytes: usize) {
+        self.packets_written = self.packets_written.saturating_add(1);
+        self.packet_payload_bytes = self
+            .packet_payload_bytes
+            .saturating_add(usize_to_u64_saturating(packet_payload_bytes));
+        self.max_packet_payload_bytes = self.max_packet_payload_bytes.max(packet_payload_bytes);
+    }
+
+    fn record_buffered_bytes_after_write(&mut self, buffered_bytes_after_write: usize) {
+        self.buffered_bytes_after_last_write = buffered_bytes_after_write;
+    }
+
+    fn record_finalized_packet(&mut self, packet_payload_bytes: usize) {
+        self.finalized_packet_payload_bytes = packet_payload_bytes;
+    }
+}
+
 /// A handler for a bulk insert data flow.
 #[derive(Debug)]
 pub struct BulkLoadRequest<'a, S>
@@ -116,6 +164,7 @@ where
     packet_id: u8,
     buf: BytesMut,
     columns: Vec<MetaDataColumn<'a>>,
+    packet_stats: BulkLoadPacketStats,
 }
 
 impl<'a, S> BulkLoadRequest<'a, S>
@@ -140,6 +189,7 @@ where
             packet_id,
             buf,
             columns,
+            packet_stats: BulkLoadPacketStats::default(),
         };
 
         Ok(this)
@@ -156,6 +206,11 @@ where
     /// [`Client::bulk_insert`]: crate::Client::bulk_insert
     pub fn columns(&self) -> impl ExactSizeIterator<Item = BulkLoadColumn<'_>> {
         bulk_load_columns(&self.columns)
+    }
+
+    /// Returns packet-write statistics collected by this bulk-load request.
+    pub fn packet_stats(&self) -> BulkLoadPacketStats {
+        self.packet_stats
     }
 
     /// Adds a new row to the bulk insert, flushing only when having a full packet of data.
@@ -273,7 +328,21 @@ where
     /// This method must be called after sending all the data to flush all
     /// pending data and to get the server actually to store the rows to the
     /// table.
-    pub async fn finalize(mut self) -> crate::Result<ExecuteResult> {
+    pub async fn finalize(self) -> crate::Result<ExecuteResult> {
+        let (result, _) = self.finalize_with_packet_stats().await?;
+        Ok(result)
+    }
+
+    /// Ends the bulk load and returns packet statistics collected by the request.
+    ///
+    /// This method has the same write behavior as [`finalize`], but also
+    /// returns the final packet counters that are otherwise unavailable because
+    /// finalization consumes the request.
+    ///
+    /// [`finalize`]: Self::finalize
+    pub async fn finalize_with_packet_stats(
+        mut self,
+    ) -> crate::Result<(ExecuteResult, BulkLoadPacketStats)> {
         TokenDone::default().encode(&mut self.buf)?;
         self.write_packets().await?;
 
@@ -281,6 +350,7 @@ where
         header.set_status(PacketStatus::EndOfMessage);
 
         let data = self.buf.split();
+        self.packet_stats.record_finalized_packet(data.len());
 
         event!(
             Level::TRACE,
@@ -291,15 +361,20 @@ where
         self.connection.write_to_wire(header, data).await?;
         self.connection.flush_sink().await?;
 
-        ExecuteResult::new(self.connection).await
+        let packet_stats = self.packet_stats;
+        let result = ExecuteResult::new(self.connection).await?;
+
+        Ok((result, packet_stats))
     }
 
     async fn write_packets(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
+        self.packet_stats.record_write_packets_call(self.buf.len());
 
         while self.buf.len() > packet_size {
             let header = PacketHeader::bulk_load(self.packet_id);
             let data = self.buf.split_to(packet_size);
+            self.packet_stats.record_packet_written(data.len());
 
             event!(
                 Level::TRACE,
@@ -309,6 +384,9 @@ where
 
             self.connection.write_to_wire(header, data).await?;
         }
+
+        self.packet_stats
+            .record_buffered_bytes_after_write(self.buf.len());
 
         Ok(())
     }
@@ -403,6 +481,10 @@ where
     }
 
     Ok(())
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn validate_raw_row_token_offsets(
@@ -527,6 +609,58 @@ mod tests {
         assert!(column.is_updateable());
         assert!(column.flags().contains(ColumnFlag::Nullable));
         assert_eq!(&TypeInfo::FixedLen(FixedLenType::Int4), column.type_info());
+    }
+
+    #[test]
+    fn bulk_load_packet_stats_default_to_zero() {
+        let stats = BulkLoadPacketStats::default();
+
+        assert_eq!(stats.write_packets_calls, 0);
+        assert_eq!(stats.packets_written, 0);
+        assert_eq!(stats.packet_payload_bytes, 0);
+        assert_eq!(stats.max_packet_payload_bytes, 0);
+        assert_eq!(stats.max_buffered_bytes_before_write, 0);
+        assert_eq!(stats.buffered_bytes_after_last_write, 0);
+        assert_eq!(stats.finalized_packet_payload_bytes, 0);
+    }
+
+    #[test]
+    fn bulk_load_packet_stats_record_write_attempts_and_buffer_tail() {
+        let mut stats = BulkLoadPacketStats::default();
+
+        stats.record_write_packets_call(128);
+        stats.record_buffered_bytes_after_write(17);
+        stats.record_write_packets_call(64);
+        stats.record_buffered_bytes_after_write(3);
+
+        assert_eq!(stats.write_packets_calls, 2);
+        assert_eq!(stats.max_buffered_bytes_before_write, 128);
+        assert_eq!(stats.buffered_bytes_after_last_write, 3);
+        assert_eq!(stats.packets_written, 0);
+    }
+
+    #[test]
+    fn bulk_load_packet_stats_accumulate_packet_bytes_and_maxima() {
+        let mut stats = BulkLoadPacketStats::default();
+
+        stats.record_packet_written(4);
+        stats.record_packet_written(9);
+        stats.record_packet_written(7);
+
+        assert_eq!(stats.packets_written, 3);
+        assert_eq!(stats.packet_payload_bytes, 20);
+        assert_eq!(stats.max_packet_payload_bytes, 9);
+    }
+
+    #[test]
+    fn bulk_load_packet_stats_record_final_packet_separately() {
+        let mut stats = BulkLoadPacketStats::default();
+
+        stats.record_packet_written(4096);
+        stats.record_finalized_packet(41);
+
+        assert_eq!(stats.packet_payload_bytes, 4096);
+        assert_eq!(stats.finalized_packet_payload_bytes, 41);
     }
 
     #[test]
