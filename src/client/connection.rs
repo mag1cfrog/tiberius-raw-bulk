@@ -103,6 +103,31 @@ pub(crate) struct DirectPacketWriteTiming {
     pub(crate) flush_max_pending_elapsed: std::time::Duration,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DirectPacketPollWriteSummary {
+    pub(crate) polls: u64,
+    pub(crate) pending_count: u64,
+    pub(crate) pending_elapsed: std::time::Duration,
+    pub(crate) max_pending_elapsed: std::time::Duration,
+    pub(crate) ready_count: u64,
+    pub(crate) ready_elapsed: std::time::Duration,
+    pub(crate) max_ready_elapsed: std::time::Duration,
+}
+
+impl DirectPacketWriteTiming {
+    pub(crate) fn poll_write_summary(self) -> DirectPacketPollWriteSummary {
+        DirectPacketPollWriteSummary {
+            polls: self.poll_write_polls,
+            pending_count: self.poll_write_pending_count,
+            pending_elapsed: self.poll_write_pending_elapsed,
+            max_pending_elapsed: self.poll_write_max_pending_elapsed,
+            ready_count: self.poll_write_ready_count,
+            ready_elapsed: self.poll_write_ready_elapsed,
+            max_ready_elapsed: self.poll_write_max_ready_elapsed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectPacketWritePart {
     Header,

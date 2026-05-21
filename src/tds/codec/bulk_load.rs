@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tracing::{event, Level};
 
 use crate::{
-    client::{Connection, DirectPacketWriteTiming},
+    client::{Connection, DirectPacketPollWriteSummary, DirectPacketWriteTiming},
     sql_read_bytes::SqlReadBytes,
     BytesMutWithDataColumns, ColumnFlag, ColumnType, ExecuteResult,
 };
@@ -421,15 +421,7 @@ impl BulkLoadDirectPacketWriteStats {
             timing.payload_max_write_elapsed,
             timing.payload_partial_writes,
         );
-        self.record_poll_write_summary(
-            timing.poll_write_polls,
-            timing.poll_write_pending_count,
-            timing.poll_write_pending_elapsed,
-            timing.poll_write_max_pending_elapsed,
-            timing.poll_write_ready_count,
-            timing.poll_write_ready_elapsed,
-            timing.poll_write_max_ready_elapsed,
-        );
+        self.record_poll_write_summary(timing.poll_write_summary());
         self.record_flush(
             timing.flush_elapsed,
             timing.flush_pending_count,
@@ -517,25 +509,22 @@ impl BulkLoadDirectPacketWriteStats {
         self.payload_partial_writes = self.payload_partial_writes.saturating_add(partial_writes);
     }
 
-    fn record_poll_write_summary(
-        &mut self,
-        polls: u64,
-        pending_count: u64,
-        pending_elapsed: Duration,
-        max_pending_elapsed: Duration,
-        ready_count: u64,
-        ready_elapsed: Duration,
-        max_ready_elapsed: Duration,
-    ) {
-        self.poll_write_polls = self.poll_write_polls.saturating_add(polls);
-        self.poll_write_pending_count = self.poll_write_pending_count.saturating_add(pending_count);
-        self.poll_write_pending_elapsed += pending_elapsed;
-        self.poll_write_max_pending_elapsed =
-            self.poll_write_max_pending_elapsed.max(max_pending_elapsed);
-        self.poll_write_ready_count = self.poll_write_ready_count.saturating_add(ready_count);
-        self.poll_write_ready_elapsed += ready_elapsed;
-        self.poll_write_max_ready_elapsed =
-            self.poll_write_max_ready_elapsed.max(max_ready_elapsed);
+    fn record_poll_write_summary(&mut self, summary: DirectPacketPollWriteSummary) {
+        self.poll_write_polls = self.poll_write_polls.saturating_add(summary.polls);
+        self.poll_write_pending_count = self
+            .poll_write_pending_count
+            .saturating_add(summary.pending_count);
+        self.poll_write_pending_elapsed += summary.pending_elapsed;
+        self.poll_write_max_pending_elapsed = self
+            .poll_write_max_pending_elapsed
+            .max(summary.max_pending_elapsed);
+        self.poll_write_ready_count = self
+            .poll_write_ready_count
+            .saturating_add(summary.ready_count);
+        self.poll_write_ready_elapsed += summary.ready_elapsed;
+        self.poll_write_max_ready_elapsed = self
+            .poll_write_max_ready_elapsed
+            .max(summary.max_ready_elapsed);
     }
 
     fn record_flush(
@@ -816,38 +805,44 @@ where
 
         let data_len = data.len();
         let write_start = Instant::now();
-        let write_result = if self.direct_packet_writes {
-            self.connection
+        if self.direct_packet_writes {
+            let write_result = self
+                .connection
                 .write_direct_packet_with_timing(header, &data)
-                .await
-                .map(EitherWriteTiming::Direct)
+                .await;
+            let write_elapsed = write_start.elapsed();
+            self.write_timing_stats
+                .record_write_to_wire(write_elapsed, data_len);
+            match write_result {
+                Ok(direct_timing) => {
+                    self.write_timing_stats
+                        .record_direct_final_packet_write(direct_timing);
+                    self.write_timing_stats
+                        .record_finalize_write_to_wire_elapsed(write_elapsed);
+                }
+                Err(err) => return Err(err),
+            }
         } else {
-            self.connection
+            let write_result = self
+                .connection
                 .write_to_wire_with_timing(header, data)
-                .await
-                .map(EitherWriteTiming::Framed)
-        };
-        let write_elapsed = write_start.elapsed();
-        self.write_timing_stats
-            .record_write_to_wire(write_elapsed, data_len);
-        match write_result {
-            Ok(EitherWriteTiming::Framed(connection_timing)) => {
-                self.write_timing_stats.record_connection_write(
-                    data_len,
-                    connection_timing.ready_elapsed,
-                    connection_timing.encode_elapsed,
-                    connection_timing.flush_elapsed,
-                );
-                self.write_timing_stats
-                    .record_finalize_write_to_wire_elapsed(write_elapsed);
+                .await;
+            let write_elapsed = write_start.elapsed();
+            self.write_timing_stats
+                .record_write_to_wire(write_elapsed, data_len);
+            match write_result {
+                Ok(connection_timing) => {
+                    self.write_timing_stats.record_connection_write(
+                        data_len,
+                        connection_timing.ready_elapsed,
+                        connection_timing.encode_elapsed,
+                        connection_timing.flush_elapsed,
+                    );
+                    self.write_timing_stats
+                        .record_finalize_write_to_wire_elapsed(write_elapsed);
+                }
+                Err(err) => return Err(err),
             }
-            Ok(EitherWriteTiming::Direct(direct_timing)) => {
-                self.write_timing_stats
-                    .record_direct_final_packet_write(direct_timing);
-                self.write_timing_stats
-                    .record_finalize_write_to_wire_elapsed(write_elapsed);
-            }
-            Err(err) => return Err(err),
         }
 
         let flush_start = Instant::now();
@@ -959,11 +954,6 @@ where
 
         Ok(())
     }
-}
-
-enum EitherWriteTiming {
-    Framed(crate::client::ConnectionWriteTiming),
-    Direct(DirectPacketWriteTiming),
 }
 
 fn bulk_load_columns<'a>(
@@ -1383,15 +1373,15 @@ mod tests {
             Duration::from_millis(15),
             2,
         );
-        stats.record_poll_write_summary(
-            11,
-            7,
-            Duration::from_millis(23),
-            Duration::from_millis(17),
-            4,
-            Duration::from_millis(29),
-            Duration::from_millis(19),
-        );
+        stats.record_poll_write_summary(DirectPacketPollWriteSummary {
+            polls: 11,
+            pending_count: 7,
+            pending_elapsed: Duration::from_millis(23),
+            max_pending_elapsed: Duration::from_millis(17),
+            ready_count: 4,
+            ready_elapsed: Duration::from_millis(29),
+            max_ready_elapsed: Duration::from_millis(19),
+        });
         stats.record_flush(
             Duration::from_millis(5),
             2,
