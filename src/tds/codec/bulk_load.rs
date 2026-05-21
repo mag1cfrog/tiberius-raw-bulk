@@ -246,16 +246,11 @@ impl BulkLoadWriteTimingStats {
     }
 
     fn record_direct_packet_write(&mut self, timing: DirectPacketWriteTiming) {
-        self.direct_packet_write
-            .record_packet(timing.payload_bytes, timing.header_bytes);
-        self.direct_packet_write.record_write_summary(
-            timing.write_calls,
-            timing.write_bytes,
-            timing.max_write_bytes,
-            timing.write_elapsed,
-            timing.max_write_elapsed,
-        );
-        self.direct_packet_write.record_flush(timing.flush_elapsed);
+        self.direct_packet_write.record_timing(timing, false);
+    }
+
+    fn record_direct_final_packet_write(&mut self, timing: DirectPacketWriteTiming) {
+        self.direct_packet_write.record_timing(timing, true);
     }
 }
 
@@ -325,6 +320,18 @@ pub struct BulkLoadDirectPacketWriteStats {
     pub payload_bytes: u64,
     /// Header bytes written by the direct packet writer.
     pub header_bytes: u64,
+    /// Largest payload passed to the direct packet writer.
+    pub max_payload_bytes: usize,
+    /// Number of final `EndOfMessage` packets passed to the direct packet writer.
+    pub final_calls: u64,
+    /// Payload bytes in final `EndOfMessage` packets.
+    pub final_payload_bytes: u64,
+    /// Header bytes in final `EndOfMessage` packets.
+    pub final_header_bytes: u64,
+    /// Direct packet writes observed on a raw, non-TLS stream.
+    pub raw_stream_calls: u64,
+    /// Direct packet writes observed on a TLS stream.
+    pub tls_stream_calls: u64,
     /// Number of lower-level write calls issued by the direct packet writer.
     pub write_calls: u64,
     /// Bytes accepted by lower-level writes, including headers and payloads.
@@ -335,16 +342,103 @@ pub struct BulkLoadDirectPacketWriteStats {
     pub write_elapsed: Duration,
     /// Slowest lower-level write.
     pub max_write_elapsed: Duration,
+    /// Number of lower-level writes used for packet headers.
+    pub header_write_calls: u64,
+    /// Header bytes accepted by lower-level writes.
+    pub header_write_bytes: u64,
+    /// Largest header byte count accepted by a single lower-level write.
+    pub header_max_write_bytes: usize,
+    /// Time spent awaiting lower-level header writes.
+    pub header_write_elapsed: Duration,
+    /// Slowest lower-level header write.
+    pub header_max_write_elapsed: Duration,
+    /// Header writes that accepted fewer bytes than remained in the header slice.
+    pub header_partial_writes: u64,
+    /// Number of lower-level writes used for packet payloads.
+    pub payload_write_calls: u64,
+    /// Payload bytes accepted by lower-level writes.
+    pub payload_write_bytes: u64,
+    /// Largest payload byte count accepted by a single lower-level write.
+    pub payload_max_write_bytes: usize,
+    /// Time spent awaiting lower-level payload writes.
+    pub payload_write_elapsed: Duration,
+    /// Slowest lower-level payload write.
+    pub payload_max_write_elapsed: Duration,
+    /// Payload writes that accepted fewer bytes than remained in the payload slice.
+    pub payload_partial_writes: u64,
+    /// Number of low-level `poll_write` attempts.
+    pub poll_write_polls: u64,
+    /// Number of `poll_write` attempts that returned `Pending`.
+    pub poll_write_pending_count: u64,
+    /// Time spent waiting after `poll_write` returned `Pending`.
+    pub poll_write_pending_elapsed: Duration,
+    /// Slowest wait after a `poll_write` returned `Pending`.
+    pub poll_write_max_pending_elapsed: Duration,
+    /// Number of `poll_write` attempts that returned ready with a write result.
+    pub poll_write_ready_count: u64,
+    /// Time spent in ready `poll_write` attempts.
+    pub poll_write_ready_elapsed: Duration,
+    /// Slowest ready `poll_write` attempt.
+    pub poll_write_max_ready_elapsed: Duration,
     /// Number of explicit direct packet writer flushes.
     pub flush_calls: u64,
     /// Time spent awaiting explicit direct packet writer flushes.
     pub flush_elapsed: Duration,
     /// Slowest explicit direct packet writer flush.
     pub max_flush_elapsed: Duration,
+    /// Number of direct packet flush polls that returned `Pending`.
+    pub flush_pending_count: u64,
+    /// Time spent waiting after direct packet flush polls returned `Pending`.
+    pub flush_pending_elapsed: Duration,
+    /// Slowest wait after a direct packet flush poll returned `Pending`.
+    pub flush_max_pending_elapsed: Duration,
 }
 
 impl BulkLoadDirectPacketWriteStats {
-    fn record_packet(&mut self, payload_bytes: usize, header_bytes: usize) {
+    fn record_timing(&mut self, timing: DirectPacketWriteTiming, final_packet: bool) {
+        self.record_packet(timing.payload_bytes, timing.header_bytes, final_packet);
+        self.record_stream_mode(timing.raw_stream, timing.tls_stream);
+        self.record_write_summary(
+            timing.write_calls,
+            timing.write_bytes,
+            timing.max_write_bytes,
+            timing.write_elapsed,
+            timing.max_write_elapsed,
+        );
+        self.record_header_write_summary(
+            timing.header_write_calls,
+            timing.header_write_bytes,
+            timing.header_max_write_bytes,
+            timing.header_write_elapsed,
+            timing.header_max_write_elapsed,
+            timing.header_partial_writes,
+        );
+        self.record_payload_write_summary(
+            timing.payload_write_calls,
+            timing.payload_write_bytes,
+            timing.payload_max_write_bytes,
+            timing.payload_write_elapsed,
+            timing.payload_max_write_elapsed,
+            timing.payload_partial_writes,
+        );
+        self.record_poll_write_summary(
+            timing.poll_write_polls,
+            timing.poll_write_pending_count,
+            timing.poll_write_pending_elapsed,
+            timing.poll_write_max_pending_elapsed,
+            timing.poll_write_ready_count,
+            timing.poll_write_ready_elapsed,
+            timing.poll_write_max_ready_elapsed,
+        );
+        self.record_flush(
+            timing.flush_elapsed,
+            timing.flush_pending_count,
+            timing.flush_pending_elapsed,
+            timing.flush_max_pending_elapsed,
+        );
+    }
+
+    fn record_packet(&mut self, payload_bytes: usize, header_bytes: usize, final_packet: bool) {
         self.calls = self.calls.saturating_add(1);
         self.payload_bytes = self
             .payload_bytes
@@ -352,6 +446,26 @@ impl BulkLoadDirectPacketWriteStats {
         self.header_bytes = self
             .header_bytes
             .saturating_add(usize_to_u64_saturating(header_bytes));
+        self.max_payload_bytes = self.max_payload_bytes.max(payload_bytes);
+
+        if final_packet {
+            self.final_calls = self.final_calls.saturating_add(1);
+            self.final_payload_bytes = self
+                .final_payload_bytes
+                .saturating_add(usize_to_u64_saturating(payload_bytes));
+            self.final_header_bytes = self
+                .final_header_bytes
+                .saturating_add(usize_to_u64_saturating(header_bytes));
+        }
+    }
+
+    fn record_stream_mode(&mut self, raw_stream: bool, tls_stream: bool) {
+        if raw_stream {
+            self.raw_stream_calls = self.raw_stream_calls.saturating_add(1);
+        }
+        if tls_stream {
+            self.tls_stream_calls = self.tls_stream_calls.saturating_add(1);
+        }
     }
 
     fn record_write_summary(
@@ -369,10 +483,74 @@ impl BulkLoadDirectPacketWriteStats {
         self.max_write_elapsed = self.max_write_elapsed.max(max_elapsed);
     }
 
-    fn record_flush(&mut self, elapsed: Duration) {
+    fn record_header_write_summary(
+        &mut self,
+        calls: u64,
+        bytes: u64,
+        max_bytes: usize,
+        elapsed: Duration,
+        max_elapsed: Duration,
+        partial_writes: u64,
+    ) {
+        self.header_write_calls = self.header_write_calls.saturating_add(calls);
+        self.header_write_bytes = self.header_write_bytes.saturating_add(bytes);
+        self.header_max_write_bytes = self.header_max_write_bytes.max(max_bytes);
+        self.header_write_elapsed += elapsed;
+        self.header_max_write_elapsed = self.header_max_write_elapsed.max(max_elapsed);
+        self.header_partial_writes = self.header_partial_writes.saturating_add(partial_writes);
+    }
+
+    fn record_payload_write_summary(
+        &mut self,
+        calls: u64,
+        bytes: u64,
+        max_bytes: usize,
+        elapsed: Duration,
+        max_elapsed: Duration,
+        partial_writes: u64,
+    ) {
+        self.payload_write_calls = self.payload_write_calls.saturating_add(calls);
+        self.payload_write_bytes = self.payload_write_bytes.saturating_add(bytes);
+        self.payload_max_write_bytes = self.payload_max_write_bytes.max(max_bytes);
+        self.payload_write_elapsed += elapsed;
+        self.payload_max_write_elapsed = self.payload_max_write_elapsed.max(max_elapsed);
+        self.payload_partial_writes = self.payload_partial_writes.saturating_add(partial_writes);
+    }
+
+    fn record_poll_write_summary(
+        &mut self,
+        polls: u64,
+        pending_count: u64,
+        pending_elapsed: Duration,
+        max_pending_elapsed: Duration,
+        ready_count: u64,
+        ready_elapsed: Duration,
+        max_ready_elapsed: Duration,
+    ) {
+        self.poll_write_polls = self.poll_write_polls.saturating_add(polls);
+        self.poll_write_pending_count = self.poll_write_pending_count.saturating_add(pending_count);
+        self.poll_write_pending_elapsed += pending_elapsed;
+        self.poll_write_max_pending_elapsed =
+            self.poll_write_max_pending_elapsed.max(max_pending_elapsed);
+        self.poll_write_ready_count = self.poll_write_ready_count.saturating_add(ready_count);
+        self.poll_write_ready_elapsed += ready_elapsed;
+        self.poll_write_max_ready_elapsed =
+            self.poll_write_max_ready_elapsed.max(max_ready_elapsed);
+    }
+
+    fn record_flush(
+        &mut self,
+        elapsed: Duration,
+        pending_count: u64,
+        pending_elapsed: Duration,
+        max_pending_elapsed: Duration,
+    ) {
         self.flush_calls = self.flush_calls.saturating_add(1);
         self.flush_elapsed += elapsed;
         self.max_flush_elapsed = self.max_flush_elapsed.max(elapsed);
+        self.flush_pending_count = self.flush_pending_count.saturating_add(pending_count);
+        self.flush_pending_elapsed += pending_elapsed;
+        self.flush_max_pending_elapsed = self.flush_max_pending_elapsed.max(max_pending_elapsed);
     }
 }
 
@@ -665,7 +843,7 @@ where
             }
             Ok(EitherWriteTiming::Direct(direct_timing)) => {
                 self.write_timing_stats
-                    .record_direct_packet_write(direct_timing);
+                    .record_direct_final_packet_write(direct_timing);
                 self.write_timing_stats
                     .record_finalize_write_to_wire_elapsed(write_elapsed);
             }
@@ -1136,22 +1314,52 @@ mod tests {
         assert_eq!(stats.calls, 0);
         assert_eq!(stats.payload_bytes, 0);
         assert_eq!(stats.header_bytes, 0);
+        assert_eq!(stats.max_payload_bytes, 0);
+        assert_eq!(stats.final_calls, 0);
+        assert_eq!(stats.final_payload_bytes, 0);
+        assert_eq!(stats.final_header_bytes, 0);
+        assert_eq!(stats.raw_stream_calls, 0);
+        assert_eq!(stats.tls_stream_calls, 0);
         assert_eq!(stats.write_calls, 0);
         assert_eq!(stats.write_bytes, 0);
         assert_eq!(stats.max_write_bytes, 0);
         assert_eq!(stats.write_elapsed, Duration::ZERO);
         assert_eq!(stats.max_write_elapsed, Duration::ZERO);
+        assert_eq!(stats.header_write_calls, 0);
+        assert_eq!(stats.header_write_bytes, 0);
+        assert_eq!(stats.header_max_write_bytes, 0);
+        assert_eq!(stats.header_write_elapsed, Duration::ZERO);
+        assert_eq!(stats.header_max_write_elapsed, Duration::ZERO);
+        assert_eq!(stats.header_partial_writes, 0);
+        assert_eq!(stats.payload_write_calls, 0);
+        assert_eq!(stats.payload_write_bytes, 0);
+        assert_eq!(stats.payload_max_write_bytes, 0);
+        assert_eq!(stats.payload_write_elapsed, Duration::ZERO);
+        assert_eq!(stats.payload_max_write_elapsed, Duration::ZERO);
+        assert_eq!(stats.payload_partial_writes, 0);
+        assert_eq!(stats.poll_write_polls, 0);
+        assert_eq!(stats.poll_write_pending_count, 0);
+        assert_eq!(stats.poll_write_pending_elapsed, Duration::ZERO);
+        assert_eq!(stats.poll_write_max_pending_elapsed, Duration::ZERO);
+        assert_eq!(stats.poll_write_ready_count, 0);
+        assert_eq!(stats.poll_write_ready_elapsed, Duration::ZERO);
+        assert_eq!(stats.poll_write_max_ready_elapsed, Duration::ZERO);
         assert_eq!(stats.flush_calls, 0);
         assert_eq!(stats.flush_elapsed, Duration::ZERO);
         assert_eq!(stats.max_flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.flush_pending_count, 0);
+        assert_eq!(stats.flush_pending_elapsed, Duration::ZERO);
+        assert_eq!(stats.flush_max_pending_elapsed, Duration::ZERO);
     }
 
     #[test]
     fn bulk_load_direct_packet_write_stats_accumulate_and_track_maxima() {
         let mut stats = BulkLoadDirectPacketWriteStats::default();
 
-        stats.record_packet(128, HEADER_BYTES);
-        stats.record_packet(256, HEADER_BYTES);
+        stats.record_packet(128, HEADER_BYTES, false);
+        stats.record_packet(256, HEADER_BYTES, true);
+        stats.record_stream_mode(true, false);
+        stats.record_stream_mode(false, true);
         stats.record_write_summary(
             2,
             576,
@@ -1159,20 +1367,92 @@ mod tests {
             Duration::from_millis(14),
             Duration::from_millis(11),
         );
-        stats.record_flush(Duration::from_millis(5));
-        stats.record_flush(Duration::from_millis(7));
+        stats.record_header_write_summary(
+            3,
+            24,
+            HEADER_BYTES,
+            Duration::from_millis(17),
+            Duration::from_millis(13),
+            1,
+        );
+        stats.record_payload_write_summary(
+            5,
+            552,
+            384,
+            Duration::from_millis(19),
+            Duration::from_millis(15),
+            2,
+        );
+        stats.record_poll_write_summary(
+            11,
+            7,
+            Duration::from_millis(23),
+            Duration::from_millis(17),
+            4,
+            Duration::from_millis(29),
+            Duration::from_millis(19),
+        );
+        stats.record_flush(
+            Duration::from_millis(5),
+            2,
+            Duration::from_millis(3),
+            Duration::from_millis(2),
+        );
+        stats.record_flush(
+            Duration::from_millis(7),
+            3,
+            Duration::from_millis(4),
+            Duration::from_millis(3),
+        );
 
         assert_eq!(stats.calls, 2);
         assert_eq!(stats.payload_bytes, 384);
         assert_eq!(stats.header_bytes, u64::try_from(HEADER_BYTES * 2).unwrap());
+        assert_eq!(stats.max_payload_bytes, 256);
+        assert_eq!(stats.final_calls, 1);
+        assert_eq!(stats.final_payload_bytes, 256);
+        assert_eq!(
+            stats.final_header_bytes,
+            u64::try_from(HEADER_BYTES).unwrap()
+        );
+        assert_eq!(stats.raw_stream_calls, 1);
+        assert_eq!(stats.tls_stream_calls, 1);
         assert_eq!(stats.write_calls, 2);
         assert_eq!(stats.write_bytes, 576);
         assert_eq!(stats.max_write_bytes, 512);
         assert_eq!(stats.write_elapsed, Duration::from_millis(14));
         assert_eq!(stats.max_write_elapsed, Duration::from_millis(11));
+        assert_eq!(stats.header_write_calls, 3);
+        assert_eq!(stats.header_write_bytes, 24);
+        assert_eq!(stats.header_max_write_bytes, HEADER_BYTES);
+        assert_eq!(stats.header_write_elapsed, Duration::from_millis(17));
+        assert_eq!(stats.header_max_write_elapsed, Duration::from_millis(13));
+        assert_eq!(stats.header_partial_writes, 1);
+        assert_eq!(stats.payload_write_calls, 5);
+        assert_eq!(stats.payload_write_bytes, 552);
+        assert_eq!(stats.payload_max_write_bytes, 384);
+        assert_eq!(stats.payload_write_elapsed, Duration::from_millis(19));
+        assert_eq!(stats.payload_max_write_elapsed, Duration::from_millis(15));
+        assert_eq!(stats.payload_partial_writes, 2);
+        assert_eq!(stats.poll_write_polls, 11);
+        assert_eq!(stats.poll_write_pending_count, 7);
+        assert_eq!(stats.poll_write_pending_elapsed, Duration::from_millis(23));
+        assert_eq!(
+            stats.poll_write_max_pending_elapsed,
+            Duration::from_millis(17)
+        );
+        assert_eq!(stats.poll_write_ready_count, 4);
+        assert_eq!(stats.poll_write_ready_elapsed, Duration::from_millis(29));
+        assert_eq!(
+            stats.poll_write_max_ready_elapsed,
+            Duration::from_millis(19)
+        );
         assert_eq!(stats.flush_calls, 2);
         assert_eq!(stats.flush_elapsed, Duration::from_millis(12));
         assert_eq!(stats.max_flush_elapsed, Duration::from_millis(7));
+        assert_eq!(stats.flush_pending_count, 5);
+        assert_eq!(stats.flush_pending_elapsed, Duration::from_millis(7));
+        assert_eq!(stats.flush_max_pending_elapsed, Duration::from_millis(3));
     }
 
     #[test]
