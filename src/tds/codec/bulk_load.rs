@@ -2,6 +2,7 @@ use asynchronous_codec::BytesMut;
 use bytes::BufMut;
 use enumflags2::BitFlags;
 use futures_util::io::{AsyncRead, AsyncWrite};
+use std::time::{Duration, Instant};
 use tracing::{event, Level};
 
 use crate::{
@@ -154,6 +155,89 @@ impl BulkLoadPacketStats {
     }
 }
 
+/// Bulk-load write timing statistics collected by a bulk-load request.
+///
+/// These counters are intended for benchmarking and diagnostics. They separate
+/// time spent in bulk-load packet draining from lower-level connection writes
+/// and flushes without changing bulk-load behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkLoadWriteTimingStats {
+    /// Time spent inside bulk-load packet drain attempts.
+    pub write_packets_elapsed: Duration,
+    /// Number of times bulk-load packet draining wrote to the connection.
+    pub write_to_wire_calls: u64,
+    /// Time spent awaiting lower-level connection writes from bulk load.
+    pub write_to_wire_elapsed: Duration,
+    /// Payload bytes passed to lower-level connection writes from bulk load.
+    pub write_to_wire_payload_bytes: u64,
+    /// Slowest lower-level connection write awaited by bulk load.
+    pub max_write_to_wire_elapsed: Duration,
+    /// Largest payload passed to a lower-level connection write from bulk load.
+    pub max_write_to_wire_payload_bytes: usize,
+    /// Number of bulk-load flushes.
+    pub flush_calls: u64,
+    /// Time spent awaiting bulk-load flushes.
+    pub flush_elapsed: Duration,
+    /// Slowest explicit flush awaited by bulk load.
+    pub max_flush_elapsed: Duration,
+    /// Time spent finalizing the bulk-load request.
+    pub finalize_elapsed: Duration,
+    /// Time spent awaiting the final `EndOfMessage` packet write.
+    pub finalize_write_to_wire_elapsed: Duration,
+    /// Time spent awaiting the final explicit flush.
+    pub finalize_flush_elapsed: Duration,
+    /// Time spent waiting for the server result after final bulk packet flush.
+    pub finalize_result_elapsed: Duration,
+}
+
+impl BulkLoadWriteTimingStats {
+    fn record_write_packets_elapsed(&mut self, elapsed: Duration) {
+        self.write_packets_elapsed += elapsed;
+    }
+
+    fn record_write_to_wire(&mut self, elapsed: Duration, payload_bytes: usize) {
+        self.write_to_wire_calls = self.write_to_wire_calls.saturating_add(1);
+        self.write_to_wire_elapsed += elapsed;
+        self.write_to_wire_payload_bytes = self
+            .write_to_wire_payload_bytes
+            .saturating_add(usize_to_u64_saturating(payload_bytes));
+        self.max_write_to_wire_elapsed = self.max_write_to_wire_elapsed.max(elapsed);
+        self.max_write_to_wire_payload_bytes =
+            self.max_write_to_wire_payload_bytes.max(payload_bytes);
+    }
+
+    fn record_flush(&mut self, elapsed: Duration) {
+        self.flush_calls = self.flush_calls.saturating_add(1);
+        self.flush_elapsed += elapsed;
+        self.max_flush_elapsed = self.max_flush_elapsed.max(elapsed);
+    }
+
+    fn record_finalize_elapsed(&mut self, elapsed: Duration) {
+        self.finalize_elapsed += elapsed;
+    }
+
+    fn record_finalize_write_to_wire_elapsed(&mut self, elapsed: Duration) {
+        self.finalize_write_to_wire_elapsed += elapsed;
+    }
+
+    fn record_finalize_flush_elapsed(&mut self, elapsed: Duration) {
+        self.finalize_flush_elapsed += elapsed;
+    }
+
+    fn record_finalize_result_elapsed(&mut self, elapsed: Duration) {
+        self.finalize_result_elapsed += elapsed;
+    }
+}
+
+/// Complete benchmark statistics collected by a bulk-load request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkLoadStats {
+    /// Packet counters collected while writing bulk-load data.
+    pub packet: BulkLoadPacketStats,
+    /// Timing counters collected while writing bulk-load data.
+    pub write_timing: BulkLoadWriteTimingStats,
+}
+
 /// A handler for a bulk insert data flow.
 #[derive(Debug)]
 pub struct BulkLoadRequest<'a, S>
@@ -165,6 +249,7 @@ where
     buf: BytesMut,
     columns: Vec<MetaDataColumn<'a>>,
     packet_stats: BulkLoadPacketStats,
+    write_timing_stats: BulkLoadWriteTimingStats,
 }
 
 impl<'a, S> BulkLoadRequest<'a, S>
@@ -190,6 +275,7 @@ where
             buf,
             columns,
             packet_stats: BulkLoadPacketStats::default(),
+            write_timing_stats: BulkLoadWriteTimingStats::default(),
         };
 
         Ok(this)
@@ -211,6 +297,19 @@ where
     /// Returns packet-write statistics collected by this bulk-load request.
     pub fn packet_stats(&self) -> BulkLoadPacketStats {
         self.packet_stats
+    }
+
+    /// Returns write timing statistics collected by this bulk-load request.
+    pub fn write_timing_stats(&self) -> BulkLoadWriteTimingStats {
+        self.write_timing_stats
+    }
+
+    /// Returns all benchmark statistics collected by this bulk-load request.
+    pub fn stats(&self) -> BulkLoadStats {
+        BulkLoadStats {
+            packet: self.packet_stats,
+            write_timing: self.write_timing_stats,
+        }
     }
 
     /// Adds a new row to the bulk insert, flushing only when having a full packet of data.
@@ -329,7 +428,7 @@ where
     /// pending data and to get the server actually to store the rows to the
     /// table.
     pub async fn finalize(self) -> crate::Result<ExecuteResult> {
-        let (result, _) = self.finalize_with_packet_stats().await?;
+        let (result, _) = self.finalize_with_stats().await?;
         Ok(result)
     }
 
@@ -341,8 +440,21 @@ where
     ///
     /// [`finalize`]: Self::finalize
     pub async fn finalize_with_packet_stats(
-        mut self,
+        self,
     ) -> crate::Result<(ExecuteResult, BulkLoadPacketStats)> {
+        let (result, stats) = self.finalize_with_stats().await?;
+        Ok((result, stats.packet))
+    }
+
+    /// Ends the bulk load and returns all benchmark statistics collected by the request.
+    ///
+    /// This method has the same write behavior as [`finalize`], but returns
+    /// packet counters and write timing counters after finalization consumes
+    /// the request.
+    ///
+    /// [`finalize`]: Self::finalize
+    pub async fn finalize_with_stats(mut self) -> crate::Result<(ExecuteResult, BulkLoadStats)> {
+        let finalize_start = Instant::now();
         TokenDone::default().encode(&mut self.buf)?;
         self.write_packets().await?;
 
@@ -358,16 +470,44 @@ where
             data.len() + HEADER_BYTES,
         );
 
-        self.connection.write_to_wire(header, data).await?;
-        self.connection.flush_sink().await?;
+        let data_len = data.len();
+        let write_start = Instant::now();
+        let write_result = self.connection.write_to_wire(header, data).await;
+        let write_elapsed = write_start.elapsed();
+        self.write_timing_stats
+            .record_write_to_wire(write_elapsed, data_len);
+        self.write_timing_stats
+            .record_finalize_write_to_wire_elapsed(write_elapsed);
+        write_result?;
 
-        let packet_stats = self.packet_stats;
+        let flush_start = Instant::now();
+        let flush_result = self.connection.flush_sink().await;
+        let flush_elapsed = flush_start.elapsed();
+        self.write_timing_stats.record_flush(flush_elapsed);
+        self.write_timing_stats
+            .record_finalize_flush_elapsed(flush_elapsed);
+        flush_result?;
+
+        let result_start = Instant::now();
         let result = ExecuteResult::new(self.connection).await?;
+        self.write_timing_stats
+            .record_finalize_result_elapsed(result_start.elapsed());
+        self.write_timing_stats
+            .record_finalize_elapsed(finalize_start.elapsed());
+        let stats = self.stats();
 
-        Ok((result, packet_stats))
+        Ok((result, stats))
     }
 
     async fn write_packets(&mut self) -> crate::Result<()> {
+        let write_packets_start = Instant::now();
+        let result = self.write_packets_inner().await;
+        self.write_timing_stats
+            .record_write_packets_elapsed(write_packets_start.elapsed());
+        result
+    }
+
+    async fn write_packets_inner(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
         self.packet_stats.record_write_packets_call(self.buf.len());
 
@@ -382,7 +522,12 @@ where
                 data.len() + HEADER_BYTES,
             );
 
-            self.connection.write_to_wire(header, data).await?;
+            let data_len = data.len();
+            let write_start = Instant::now();
+            let write_result = self.connection.write_to_wire(header, data).await;
+            self.write_timing_stats
+                .record_write_to_wire(write_start.elapsed(), data_len);
+            write_result?;
         }
 
         self.packet_stats
@@ -661,6 +806,73 @@ mod tests {
 
         assert_eq!(stats.packet_payload_bytes, 4096);
         assert_eq!(stats.finalized_packet_payload_bytes, 41);
+    }
+
+    #[test]
+    fn bulk_load_write_timing_stats_default_to_zero() {
+        let stats = BulkLoadWriteTimingStats::default();
+
+        assert_eq!(stats.write_packets_elapsed, Duration::ZERO);
+        assert_eq!(stats.write_to_wire_calls, 0);
+        assert_eq!(stats.write_to_wire_elapsed, Duration::ZERO);
+        assert_eq!(stats.write_to_wire_payload_bytes, 0);
+        assert_eq!(stats.max_write_to_wire_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_write_to_wire_payload_bytes, 0);
+        assert_eq!(stats.flush_calls, 0);
+        assert_eq!(stats.flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.finalize_elapsed, Duration::ZERO);
+        assert_eq!(stats.finalize_write_to_wire_elapsed, Duration::ZERO);
+        assert_eq!(stats.finalize_flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.finalize_result_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn bulk_load_write_timing_stats_accumulate_write_packets_elapsed() {
+        let mut stats = BulkLoadWriteTimingStats::default();
+
+        stats.record_write_packets_elapsed(Duration::from_millis(7));
+        stats.record_write_packets_elapsed(Duration::from_millis(11));
+
+        assert_eq!(stats.write_packets_elapsed, Duration::from_millis(18));
+    }
+
+    #[test]
+    fn bulk_load_write_timing_stats_accumulate_write_to_wire() {
+        let mut stats = BulkLoadWriteTimingStats::default();
+
+        stats.record_write_to_wire(Duration::from_millis(13), 128);
+        stats.record_write_to_wire(Duration::from_millis(17), 256);
+
+        assert_eq!(stats.write_to_wire_calls, 2);
+        assert_eq!(stats.write_to_wire_elapsed, Duration::from_millis(30));
+        assert_eq!(stats.write_to_wire_payload_bytes, 384);
+        assert_eq!(stats.max_write_to_wire_elapsed, Duration::from_millis(17));
+        assert_eq!(stats.max_write_to_wire_payload_bytes, 256);
+    }
+
+    #[test]
+    fn bulk_load_write_timing_stats_accumulate_flush_and_finalize() {
+        let mut stats = BulkLoadWriteTimingStats::default();
+
+        stats.record_flush(Duration::from_millis(19));
+        stats.record_flush(Duration::from_millis(23));
+        stats.record_finalize_elapsed(Duration::from_millis(29));
+        stats.record_finalize_elapsed(Duration::from_millis(31));
+        stats.record_finalize_write_to_wire_elapsed(Duration::from_millis(37));
+        stats.record_finalize_flush_elapsed(Duration::from_millis(41));
+        stats.record_finalize_result_elapsed(Duration::from_millis(43));
+
+        assert_eq!(stats.flush_calls, 2);
+        assert_eq!(stats.flush_elapsed, Duration::from_millis(42));
+        assert_eq!(stats.max_flush_elapsed, Duration::from_millis(23));
+        assert_eq!(stats.finalize_elapsed, Duration::from_millis(60));
+        assert_eq!(
+            stats.finalize_write_to_wire_elapsed,
+            Duration::from_millis(37)
+        );
+        assert_eq!(stats.finalize_flush_elapsed, Duration::from_millis(41));
+        assert_eq!(stats.finalize_result_elapsed, Duration::from_millis(43));
     }
 
     #[test]
