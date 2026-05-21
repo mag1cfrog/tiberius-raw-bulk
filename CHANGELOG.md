@@ -1,5 +1,16 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.8
+
+- Add deeper raw bulk connection-write timing statistics:
+  - `BulkLoadConnectionWriteStats`;
+  - `BulkLoadWriteTimingStats::connection_write`.
+- Split raw bulk framed sink writes into readiness, packet encode/start-send,
+  and sink flush timing while keeping normal non-bulk writes on the existing
+  `SinkExt::send` path.
+- Preserve existing combined stats access through `BulkLoadRequest::stats()`
+  and `BulkLoadRequest::finalize_with_stats()`.
+
 ## Version 0.12.3-raw-bulk.7
 
 - Add request-scoped bulk-load write timing statistics:
