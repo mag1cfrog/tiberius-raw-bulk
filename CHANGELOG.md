@@ -1,5 +1,20 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.10
+
+- Add deeper experimental direct packet write profiling:
+  - header vs payload write calls, bytes, elapsed time, maxima, and partial
+    write counters;
+  - `poll_write` poll, pending, and ready counters with elapsed-time
+    breakdowns;
+  - direct packet flush pending counters and elapsed-time breakdowns;
+  - raw stream vs TLS stream packet counters;
+  - final `EndOfMessage` direct packet counters.
+- Keep direct packet writes opt-in through
+  `BulkLoadRequest::enable_direct_packet_writes()`.
+- Keep normal query writes and default bulk writes on the existing framed packet
+  sink.
+
 ## Version 0.12.3-raw-bulk.9
 
 - Add an opt-in raw bulk direct packet writer for benchmark comparison:

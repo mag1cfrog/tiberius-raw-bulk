@@ -71,12 +71,67 @@ pub(crate) struct ConnectionWriteTiming {
 pub(crate) struct DirectPacketWriteTiming {
     pub(crate) header_bytes: usize,
     pub(crate) payload_bytes: usize,
+    pub(crate) raw_stream: bool,
+    pub(crate) tls_stream: bool,
     pub(crate) write_calls: u64,
     pub(crate) write_bytes: u64,
     pub(crate) max_write_bytes: usize,
     pub(crate) write_elapsed: std::time::Duration,
     pub(crate) max_write_elapsed: std::time::Duration,
+    pub(crate) header_write_calls: u64,
+    pub(crate) header_write_bytes: u64,
+    pub(crate) header_max_write_bytes: usize,
+    pub(crate) header_write_elapsed: std::time::Duration,
+    pub(crate) header_max_write_elapsed: std::time::Duration,
+    pub(crate) header_partial_writes: u64,
+    pub(crate) payload_write_calls: u64,
+    pub(crate) payload_write_bytes: u64,
+    pub(crate) payload_max_write_bytes: usize,
+    pub(crate) payload_write_elapsed: std::time::Duration,
+    pub(crate) payload_max_write_elapsed: std::time::Duration,
+    pub(crate) payload_partial_writes: u64,
+    pub(crate) poll_write_polls: u64,
+    pub(crate) poll_write_pending_count: u64,
+    pub(crate) poll_write_pending_elapsed: std::time::Duration,
+    pub(crate) poll_write_max_pending_elapsed: std::time::Duration,
+    pub(crate) poll_write_ready_count: u64,
+    pub(crate) poll_write_ready_elapsed: std::time::Duration,
+    pub(crate) poll_write_max_ready_elapsed: std::time::Duration,
     pub(crate) flush_elapsed: std::time::Duration,
+    pub(crate) flush_pending_count: u64,
+    pub(crate) flush_pending_elapsed: std::time::Duration,
+    pub(crate) flush_max_pending_elapsed: std::time::Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DirectPacketPollWriteSummary {
+    pub(crate) polls: u64,
+    pub(crate) pending_count: u64,
+    pub(crate) pending_elapsed: std::time::Duration,
+    pub(crate) max_pending_elapsed: std::time::Duration,
+    pub(crate) ready_count: u64,
+    pub(crate) ready_elapsed: std::time::Duration,
+    pub(crate) max_ready_elapsed: std::time::Duration,
+}
+
+impl DirectPacketWriteTiming {
+    pub(crate) fn poll_write_summary(self) -> DirectPacketPollWriteSummary {
+        DirectPacketPollWriteSummary {
+            polls: self.poll_write_polls,
+            pending_count: self.poll_write_pending_count,
+            pending_elapsed: self.poll_write_pending_elapsed,
+            max_pending_elapsed: self.poll_write_max_pending_elapsed,
+            ready_count: self.poll_write_ready_count,
+            ready_elapsed: self.poll_write_ready_elapsed,
+            max_ready_elapsed: self.poll_write_max_ready_elapsed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectPacketWritePart {
+    Header,
+    Payload,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
@@ -282,18 +337,36 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         let mut timing = DirectPacketWriteTiming {
             header_bytes: header_bytes.len(),
             payload_bytes: payload.len(),
+            raw_stream: matches!(&*self.transport, MaybeTlsStream::Raw(_)),
+            #[cfg(any(
+                feature = "rustls",
+                feature = "native-tls",
+                feature = "vendored-openssl"
+            ))]
+            tls_stream: matches!(&*self.transport, MaybeTlsStream::Tls(_)),
             ..DirectPacketWriteTiming::default()
         };
 
         // This benchmark-only path bypasses the framed packet sink and writes
         // a complete TDS packet directly to the underlying stream. Callers must
         // use it only when no framed packet bytes are buffered.
-        Self::write_all_direct_packet_bytes(&mut self.transport, &header_bytes, &mut timing)
-            .await?;
-        Self::write_all_direct_packet_bytes(&mut self.transport, payload, &mut timing).await?;
+        Self::write_all_direct_packet_bytes(
+            &mut self.transport,
+            &header_bytes,
+            DirectPacketWritePart::Header,
+            &mut timing,
+        )
+        .await?;
+        Self::write_all_direct_packet_bytes(
+            &mut self.transport,
+            payload,
+            DirectPacketWritePart::Payload,
+            &mut timing,
+        )
+        .await?;
 
         let flush_start = std::time::Instant::now();
-        poll_fn(|cx| Pin::new(&mut *self.transport).poll_flush(cx)).await?;
+        Self::poll_direct_packet_flush(&mut self.transport, &mut timing).await?;
         timing.flush_elapsed = flush_start.elapsed();
 
         Ok(timing)
@@ -302,11 +375,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     async fn write_all_direct_packet_bytes(
         stream: &mut MaybeTlsStream<S>,
         mut bytes: &[u8],
+        part: DirectPacketWritePart,
         timing: &mut DirectPacketWriteTiming,
     ) -> crate::Result<()> {
         while !bytes.is_empty() {
+            let remaining = bytes.len();
             let write_start = std::time::Instant::now();
-            let written = poll_fn(|cx| Pin::new(&mut *stream).poll_write(cx, bytes)).await?;
+            let written = Self::poll_direct_packet_write(stream, bytes, timing).await?;
             let elapsed = write_start.elapsed();
 
             if written == 0 {
@@ -324,10 +399,114 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             timing.max_write_bytes = timing.max_write_bytes.max(written);
             timing.write_elapsed += elapsed;
             timing.max_write_elapsed = timing.max_write_elapsed.max(elapsed);
+            Self::record_direct_packet_write_part(timing, part, remaining, written, elapsed);
             bytes = &bytes[written..];
         }
 
         Ok(())
+    }
+
+    async fn poll_direct_packet_write(
+        stream: &mut MaybeTlsStream<S>,
+        bytes: &[u8],
+        timing: &mut DirectPacketWriteTiming,
+    ) -> io::Result<usize> {
+        let mut pending_start = None;
+
+        poll_fn(|cx| {
+            timing.poll_write_polls = timing.poll_write_polls.saturating_add(1);
+            let ready_start = std::time::Instant::now();
+            match Pin::new(&mut *stream).poll_write(cx, bytes) {
+                Poll::Pending => {
+                    timing.poll_write_pending_count =
+                        timing.poll_write_pending_count.saturating_add(1);
+                    if pending_start.is_none() {
+                        pending_start = Some(std::time::Instant::now());
+                    }
+                    Poll::Pending
+                }
+                Poll::Ready(result) => {
+                    let ready_elapsed = ready_start.elapsed();
+                    timing.poll_write_ready_count = timing.poll_write_ready_count.saturating_add(1);
+                    timing.poll_write_ready_elapsed += ready_elapsed;
+                    timing.poll_write_max_ready_elapsed =
+                        timing.poll_write_max_ready_elapsed.max(ready_elapsed);
+
+                    if let Some(start) = pending_start.take() {
+                        let pending_elapsed = start.elapsed();
+                        timing.poll_write_pending_elapsed += pending_elapsed;
+                        timing.poll_write_max_pending_elapsed =
+                            timing.poll_write_max_pending_elapsed.max(pending_elapsed);
+                    }
+
+                    Poll::Ready(result)
+                }
+            }
+        })
+        .await
+    }
+
+    async fn poll_direct_packet_flush(
+        stream: &mut MaybeTlsStream<S>,
+        timing: &mut DirectPacketWriteTiming,
+    ) -> io::Result<()> {
+        let mut pending_start = None;
+
+        poll_fn(|cx| match Pin::new(&mut *stream).poll_flush(cx) {
+            Poll::Pending => {
+                timing.flush_pending_count = timing.flush_pending_count.saturating_add(1);
+                if pending_start.is_none() {
+                    pending_start = Some(std::time::Instant::now());
+                }
+                Poll::Pending
+            }
+            Poll::Ready(result) => {
+                if let Some(start) = pending_start.take() {
+                    let pending_elapsed = start.elapsed();
+                    timing.flush_pending_elapsed += pending_elapsed;
+                    timing.flush_max_pending_elapsed =
+                        timing.flush_max_pending_elapsed.max(pending_elapsed);
+                }
+
+                Poll::Ready(result)
+            }
+        })
+        .await
+    }
+
+    fn record_direct_packet_write_part(
+        timing: &mut DirectPacketWriteTiming,
+        part: DirectPacketWritePart,
+        remaining: usize,
+        written: usize,
+        elapsed: std::time::Duration,
+    ) {
+        let partial_write = u64::from(written < remaining);
+
+        match part {
+            DirectPacketWritePart::Header => {
+                timing.header_write_calls = timing.header_write_calls.saturating_add(1);
+                timing.header_write_bytes = timing
+                    .header_write_bytes
+                    .saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
+                timing.header_max_write_bytes = timing.header_max_write_bytes.max(written);
+                timing.header_write_elapsed += elapsed;
+                timing.header_max_write_elapsed = timing.header_max_write_elapsed.max(elapsed);
+                timing.header_partial_writes =
+                    timing.header_partial_writes.saturating_add(partial_write);
+            }
+            DirectPacketWritePart::Payload => {
+                timing.payload_write_calls = timing.payload_write_calls.saturating_add(1);
+                timing.payload_write_bytes = timing
+                    .payload_write_bytes
+                    .saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
+                timing.payload_max_write_bytes = timing.payload_max_write_bytes.max(written);
+                timing.payload_write_elapsed += elapsed;
+                timing.payload_max_write_elapsed = timing.payload_max_write_elapsed.max(elapsed);
+                timing.payload_partial_writes =
+                    timing.payload_partial_writes.saturating_add(partial_write);
+            }
+        }
     }
 
     /// Sends all pending packages to the wire.
@@ -692,5 +871,250 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
     /// A mutable reference to the current execution context.
     fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Connection, DirectPacketWritePart, DirectPacketWriteTiming, MaybeTlsStream};
+    use crate::tds::{
+        codec::{PacketCodec, PacketHeader},
+        Context, HEADER_BYTES,
+    };
+    use asynchronous_codec::Framed;
+    use bytes::BytesMut;
+    use futures_util::io::{AsyncRead, AsyncWrite};
+    use std::{
+        collections::VecDeque,
+        io,
+        pin::Pin,
+        task::{self, Poll},
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WriteAction {
+        Pending,
+        Write(usize),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum FlushAction {
+        Pending,
+        Ready,
+    }
+
+    #[derive(Debug, Default)]
+    struct ScriptedStream {
+        writes: VecDeque<WriteAction>,
+        flushes: VecDeque<FlushAction>,
+        written: Vec<u8>,
+    }
+
+    impl ScriptedStream {
+        fn with_writes(writes: impl IntoIterator<Item = WriteAction>) -> Self {
+            Self {
+                writes: writes.into_iter().collect(),
+                flushes: VecDeque::new(),
+                written: Vec::new(),
+            }
+        }
+
+        fn with_flushes(flushes: impl IntoIterator<Item = FlushAction>) -> Self {
+            Self {
+                writes: VecDeque::new(),
+                flushes: flushes.into_iter().collect(),
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for ScriptedStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut task::Context<'_>,
+            _buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(0))
+        }
+    }
+
+    impl AsyncWrite for ScriptedStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            match self.writes.pop_front() {
+                Some(WriteAction::Pending) => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Some(WriteAction::Write(bytes)) => {
+                    let accepted = bytes.min(buf.len());
+                    self.written.extend_from_slice(&buf[..accepted]);
+                    Poll::Ready(Ok(accepted))
+                }
+                None => {
+                    self.written.extend_from_slice(buf);
+                    Poll::Ready(Ok(buf.len()))
+                }
+            }
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            match self.flushes.pop_front() {
+                Some(FlushAction::Pending) => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Some(FlushAction::Ready) | None => Poll::Ready(Ok(())),
+            }
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[async_std::test]
+    async fn direct_packet_write_helper_records_full_header_write() {
+        let mut stream = MaybeTlsStream::Raw(ScriptedStream::with_writes([WriteAction::Write(8)]));
+        let mut timing = DirectPacketWriteTiming::default();
+
+        Connection::<ScriptedStream>::write_all_direct_packet_bytes(
+            &mut stream,
+            b"abcdefgh",
+            DirectPacketWritePart::Header,
+            &mut timing,
+        )
+        .await
+        .expect("header write should succeed");
+
+        let MaybeTlsStream::Raw(stream) = stream else {
+            unreachable!();
+        };
+        assert_eq!(stream.written, b"abcdefgh");
+        assert_eq!(timing.write_calls, 1);
+        assert_eq!(timing.write_bytes, 8);
+        assert_eq!(timing.max_write_bytes, 8);
+        assert_eq!(timing.header_write_calls, 1);
+        assert_eq!(timing.header_write_bytes, 8);
+        assert_eq!(timing.header_max_write_bytes, 8);
+        assert_eq!(timing.header_partial_writes, 0);
+        assert_eq!(timing.payload_write_calls, 0);
+        assert_eq!(timing.poll_write_polls, 1);
+        assert_eq!(timing.poll_write_pending_count, 0);
+        assert_eq!(timing.poll_write_ready_count, 1);
+    }
+
+    #[async_std::test]
+    async fn direct_packet_write_records_stream_mode_and_packet_parts() {
+        let mut connection = Connection {
+            transport: Framed::new(
+                MaybeTlsStream::Raw(ScriptedStream::with_writes([
+                    WriteAction::Write(HEADER_BYTES),
+                    WriteAction::Write(5),
+                ])),
+                PacketCodec,
+            ),
+            context: Context::new(),
+            flushed: true,
+            buf: BytesMut::new(),
+        };
+
+        let timing = connection
+            .write_direct_packet_with_timing(PacketHeader::bulk_load(9), b"abcde")
+            .await
+            .expect("direct packet write should succeed");
+
+        assert!(!connection.flushed);
+        assert!(timing.raw_stream);
+        assert!(!timing.tls_stream);
+        assert_eq!(timing.header_bytes, HEADER_BYTES);
+        assert_eq!(timing.payload_bytes, 5);
+        assert_eq!(timing.header_write_calls, 1);
+        assert_eq!(
+            timing.header_write_bytes,
+            u64::try_from(HEADER_BYTES).unwrap()
+        );
+        assert_eq!(timing.payload_write_calls, 1);
+        assert_eq!(timing.payload_write_bytes, 5);
+        assert_eq!(timing.write_calls, 2);
+        assert_eq!(timing.write_bytes, u64::try_from(HEADER_BYTES + 5).unwrap());
+        assert_eq!(timing.flush_pending_count, 0);
+    }
+
+    #[async_std::test]
+    async fn direct_packet_write_helper_records_pending_and_partial_payload_writes() {
+        let mut stream = MaybeTlsStream::Raw(ScriptedStream::with_writes([
+            WriteAction::Pending,
+            WriteAction::Write(2),
+            WriteAction::Write(3),
+        ]));
+        let mut timing = DirectPacketWriteTiming::default();
+
+        Connection::<ScriptedStream>::write_all_direct_packet_bytes(
+            &mut stream,
+            b"abcde",
+            DirectPacketWritePart::Payload,
+            &mut timing,
+        )
+        .await
+        .expect("payload write should succeed");
+
+        let MaybeTlsStream::Raw(stream) = stream else {
+            unreachable!();
+        };
+        assert_eq!(stream.written, b"abcde");
+        assert_eq!(timing.write_calls, 2);
+        assert_eq!(timing.write_bytes, 5);
+        assert_eq!(timing.max_write_bytes, 3);
+        assert_eq!(timing.payload_write_calls, 2);
+        assert_eq!(timing.payload_write_bytes, 5);
+        assert_eq!(timing.payload_max_write_bytes, 3);
+        assert_eq!(timing.payload_partial_writes, 1);
+        assert_eq!(timing.header_write_calls, 0);
+        assert_eq!(timing.poll_write_polls, 3);
+        assert_eq!(timing.poll_write_pending_count, 1);
+        assert_eq!(timing.poll_write_ready_count, 2);
+    }
+
+    #[async_std::test]
+    async fn direct_packet_write_helper_rejects_zero_byte_write() {
+        let mut stream = MaybeTlsStream::Raw(ScriptedStream::with_writes([WriteAction::Write(0)]));
+        let mut timing = DirectPacketWriteTiming::default();
+
+        let err = Connection::<ScriptedStream>::write_all_direct_packet_bytes(
+            &mut stream,
+            b"abc",
+            DirectPacketWritePart::Payload,
+            &mut timing,
+        )
+        .await
+        .expect_err("zero-byte write should fail");
+
+        assert!(matches!(err, crate::Error::Io { .. }));
+        assert_eq!(timing.write_calls, 0);
+        assert_eq!(timing.write_bytes, 0);
+        assert_eq!(timing.poll_write_polls, 1);
+        assert_eq!(timing.poll_write_ready_count, 1);
+    }
+
+    #[async_std::test]
+    async fn direct_packet_flush_helper_records_pending_flush() {
+        let mut stream = MaybeTlsStream::Raw(ScriptedStream::with_flushes([
+            FlushAction::Pending,
+            FlushAction::Ready,
+        ]));
+        let mut timing = DirectPacketWriteTiming::default();
+
+        Connection::<ScriptedStream>::poll_direct_packet_flush(&mut stream, &mut timing)
+            .await
+            .expect("flush should succeed");
+
+        assert_eq!(timing.flush_pending_count, 1);
     }
 }

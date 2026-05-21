@@ -153,14 +153,42 @@ fn external_crate_can_name_bulk_direct_packet_write_stats_api() {
     let _calls: u64 = stats.calls;
     let _payload_bytes: u64 = stats.payload_bytes;
     let _header_bytes: u64 = stats.header_bytes;
+    let _max_payload_bytes: usize = stats.max_payload_bytes;
+    let _final_calls: u64 = stats.final_calls;
+    let _final_payload_bytes: u64 = stats.final_payload_bytes;
+    let _final_header_bytes: u64 = stats.final_header_bytes;
+    let _raw_stream_calls: u64 = stats.raw_stream_calls;
+    let _tls_stream_calls: u64 = stats.tls_stream_calls;
     let _write_calls: u64 = stats.write_calls;
     let _write_bytes: u64 = stats.write_bytes;
     let _max_write_bytes: usize = stats.max_write_bytes;
     let _write_elapsed = stats.write_elapsed;
     let _max_write_elapsed = stats.max_write_elapsed;
+    let _header_write_calls: u64 = stats.header_write_calls;
+    let _header_write_bytes: u64 = stats.header_write_bytes;
+    let _header_max_write_bytes: usize = stats.header_max_write_bytes;
+    let _header_write_elapsed = stats.header_write_elapsed;
+    let _header_max_write_elapsed = stats.header_max_write_elapsed;
+    let _header_partial_writes: u64 = stats.header_partial_writes;
+    let _payload_write_calls: u64 = stats.payload_write_calls;
+    let _payload_write_bytes: u64 = stats.payload_write_bytes;
+    let _payload_max_write_bytes: usize = stats.payload_max_write_bytes;
+    let _payload_write_elapsed = stats.payload_write_elapsed;
+    let _payload_max_write_elapsed = stats.payload_max_write_elapsed;
+    let _payload_partial_writes: u64 = stats.payload_partial_writes;
+    let _poll_write_polls: u64 = stats.poll_write_polls;
+    let _poll_write_pending_count: u64 = stats.poll_write_pending_count;
+    let _poll_write_pending_elapsed = stats.poll_write_pending_elapsed;
+    let _poll_write_max_pending_elapsed = stats.poll_write_max_pending_elapsed;
+    let _poll_write_ready_count: u64 = stats.poll_write_ready_count;
+    let _poll_write_ready_elapsed = stats.poll_write_ready_elapsed;
+    let _poll_write_max_ready_elapsed = stats.poll_write_max_ready_elapsed;
     let _flush_calls: u64 = stats.flush_calls;
     let _flush_elapsed = stats.flush_elapsed;
     let _max_flush_elapsed = stats.max_flush_elapsed;
+    let _flush_pending_count: u64 = stats.flush_pending_count;
+    let _flush_pending_elapsed = stats.flush_pending_elapsed;
+    let _flush_max_pending_elapsed = stats.flush_max_pending_elapsed;
 }
 
 #[test]
