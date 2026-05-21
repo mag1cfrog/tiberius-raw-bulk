@@ -188,6 +188,9 @@ pub struct BulkLoadWriteTimingStats {
     pub finalize_flush_elapsed: Duration,
     /// Time spent waiting for the server result after final bulk packet flush.
     pub finalize_result_elapsed: Duration,
+    /// Breakdown of bulk-load connection writes below the coarse
+    /// `write_to_wire` aggregate.
+    pub connection_write: BulkLoadConnectionWriteStats,
 }
 
 impl BulkLoadWriteTimingStats {
@@ -226,6 +229,69 @@ impl BulkLoadWriteTimingStats {
 
     fn record_finalize_result_elapsed(&mut self, elapsed: Duration) {
         self.finalize_result_elapsed += elapsed;
+    }
+
+    fn record_connection_write(
+        &mut self,
+        payload_bytes: usize,
+        ready_elapsed: Duration,
+        encode_elapsed: Duration,
+        flush_elapsed: Duration,
+    ) {
+        self.connection_write
+            .record(payload_bytes, ready_elapsed, encode_elapsed, flush_elapsed);
+    }
+}
+
+/// Detailed timing statistics for bulk-load writes through the framed
+/// connection sink.
+///
+/// These counters are a diagnostic breakdown under
+/// [`BulkLoadWriteTimingStats::write_to_wire_elapsed`]. They are intended to
+/// show whether raw bulk writes are dominated by sink readiness, packet
+/// encoding, or sink flushing while preserving the existing write behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkLoadConnectionWriteStats {
+    /// Number of bulk-load packets passed into the connection write path.
+    pub calls: u64,
+    /// Payload bytes passed into the connection write path, excluding TDS
+    /// packet headers.
+    pub payload_bytes: u64,
+    /// Time spent waiting for the framed sink to accept another packet.
+    pub ready_elapsed: Duration,
+    /// Time spent encoding packets into the framed sink buffer.
+    pub encode_elapsed: Duration,
+    /// Time spent flushing the framed sink after packet encoding.
+    pub flush_elapsed: Duration,
+    /// Slowest framed sink readiness wait.
+    pub max_ready_elapsed: Duration,
+    /// Slowest packet encode operation.
+    pub max_encode_elapsed: Duration,
+    /// Slowest framed sink flush.
+    pub max_flush_elapsed: Duration,
+    /// Largest payload passed into the connection write path.
+    pub max_payload_bytes: usize,
+}
+
+impl BulkLoadConnectionWriteStats {
+    fn record(
+        &mut self,
+        payload_bytes: usize,
+        ready_elapsed: Duration,
+        encode_elapsed: Duration,
+        flush_elapsed: Duration,
+    ) {
+        self.calls = self.calls.saturating_add(1);
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(usize_to_u64_saturating(payload_bytes));
+        self.ready_elapsed += ready_elapsed;
+        self.encode_elapsed += encode_elapsed;
+        self.flush_elapsed += flush_elapsed;
+        self.max_ready_elapsed = self.max_ready_elapsed.max(ready_elapsed);
+        self.max_encode_elapsed = self.max_encode_elapsed.max(encode_elapsed);
+        self.max_flush_elapsed = self.max_flush_elapsed.max(flush_elapsed);
+        self.max_payload_bytes = self.max_payload_bytes.max(payload_bytes);
     }
 }
 
@@ -472,13 +538,26 @@ where
 
         let data_len = data.len();
         let write_start = Instant::now();
-        let write_result = self.connection.write_to_wire(header, data).await;
+        let write_result = self
+            .connection
+            .write_to_wire_with_timing(header, data)
+            .await;
         let write_elapsed = write_start.elapsed();
         self.write_timing_stats
             .record_write_to_wire(write_elapsed, data_len);
-        self.write_timing_stats
-            .record_finalize_write_to_wire_elapsed(write_elapsed);
-        write_result?;
+        match write_result {
+            Ok(connection_timing) => {
+                self.write_timing_stats.record_connection_write(
+                    data_len,
+                    connection_timing.ready_elapsed,
+                    connection_timing.encode_elapsed,
+                    connection_timing.flush_elapsed,
+                );
+                self.write_timing_stats
+                    .record_finalize_write_to_wire_elapsed(write_elapsed);
+            }
+            Err(err) => return Err(err),
+        }
 
         let flush_start = Instant::now();
         let flush_result = self.connection.flush_sink().await;
@@ -524,10 +603,23 @@ where
 
             let data_len = data.len();
             let write_start = Instant::now();
-            let write_result = self.connection.write_to_wire(header, data).await;
+            let write_result = self
+                .connection
+                .write_to_wire_with_timing(header, data)
+                .await;
             self.write_timing_stats
                 .record_write_to_wire(write_start.elapsed(), data_len);
-            write_result?;
+            match write_result {
+                Ok(connection_timing) => {
+                    self.write_timing_stats.record_connection_write(
+                        data_len,
+                        connection_timing.ready_elapsed,
+                        connection_timing.encode_elapsed,
+                        connection_timing.flush_elapsed,
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         self.packet_stats
@@ -825,6 +917,53 @@ mod tests {
         assert_eq!(stats.finalize_write_to_wire_elapsed, Duration::ZERO);
         assert_eq!(stats.finalize_flush_elapsed, Duration::ZERO);
         assert_eq!(stats.finalize_result_elapsed, Duration::ZERO);
+        assert_eq!(
+            stats.connection_write,
+            BulkLoadConnectionWriteStats::default()
+        );
+    }
+
+    #[test]
+    fn bulk_load_connection_write_stats_default_to_zero() {
+        let stats = BulkLoadConnectionWriteStats::default();
+
+        assert_eq!(stats.calls, 0);
+        assert_eq!(stats.payload_bytes, 0);
+        assert_eq!(stats.ready_elapsed, Duration::ZERO);
+        assert_eq!(stats.encode_elapsed, Duration::ZERO);
+        assert_eq!(stats.flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_ready_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_encode_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_payload_bytes, 0);
+    }
+
+    #[test]
+    fn bulk_load_connection_write_stats_accumulate_and_track_maxima() {
+        let mut stats = BulkLoadConnectionWriteStats::default();
+
+        stats.record(
+            128,
+            Duration::from_millis(3),
+            Duration::from_millis(5),
+            Duration::from_millis(7),
+        );
+        stats.record(
+            256,
+            Duration::from_millis(11),
+            Duration::from_millis(2),
+            Duration::from_millis(13),
+        );
+
+        assert_eq!(stats.calls, 2);
+        assert_eq!(stats.payload_bytes, 384);
+        assert_eq!(stats.ready_elapsed, Duration::from_millis(14));
+        assert_eq!(stats.encode_elapsed, Duration::from_millis(7));
+        assert_eq!(stats.flush_elapsed, Duration::from_millis(20));
+        assert_eq!(stats.max_ready_elapsed, Duration::from_millis(11));
+        assert_eq!(stats.max_encode_elapsed, Duration::from_millis(5));
+        assert_eq!(stats.max_flush_elapsed, Duration::from_millis(13));
+        assert_eq!(stats.max_payload_bytes, 256);
     }
 
     #[test]
@@ -862,6 +1001,12 @@ mod tests {
         stats.record_finalize_write_to_wire_elapsed(Duration::from_millis(37));
         stats.record_finalize_flush_elapsed(Duration::from_millis(41));
         stats.record_finalize_result_elapsed(Duration::from_millis(43));
+        stats.record_connection_write(
+            128,
+            Duration::from_millis(47),
+            Duration::from_millis(53),
+            Duration::from_millis(59),
+        );
 
         assert_eq!(stats.flush_calls, 2);
         assert_eq!(stats.flush_elapsed, Duration::from_millis(42));
@@ -873,6 +1018,20 @@ mod tests {
         );
         assert_eq!(stats.finalize_flush_elapsed, Duration::from_millis(41));
         assert_eq!(stats.finalize_result_elapsed, Duration::from_millis(43));
+        assert_eq!(stats.connection_write.calls, 1);
+        assert_eq!(stats.connection_write.payload_bytes, 128);
+        assert_eq!(
+            stats.connection_write.ready_elapsed,
+            Duration::from_millis(47)
+        );
+        assert_eq!(
+            stats.connection_write.encode_elapsed,
+            Duration::from_millis(53)
+        );
+        assert_eq!(
+            stats.connection_write.flush_elapsed,
+            Duration::from_millis(59)
+        );
     }
 
     #[test]

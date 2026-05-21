@@ -6,9 +6,9 @@ use std::{
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tiberius::{
-    BulkLoadColumn, BulkLoadColumns, BulkLoadPacketStats, BulkLoadRequest, BulkLoadStats,
-    BulkLoadWriteTimingStats, Client, ColumnFlag, ColumnType, ExecuteResult, FixedLenType,
-    TypeInfo, VarLenType,
+    BulkLoadColumn, BulkLoadColumns, BulkLoadConnectionWriteStats, BulkLoadPacketStats,
+    BulkLoadRequest, BulkLoadStats, BulkLoadWriteTimingStats, Client, ColumnFlag, ColumnType,
+    ExecuteResult, FixedLenType, TypeInfo, VarLenType,
 };
 
 struct ExternalStream;
@@ -127,6 +127,22 @@ fn external_crate_can_name_bulk_write_timing_stats_api() {
     let _finalize_write_elapsed = stats.finalize_write_to_wire_elapsed;
     let _finalize_flush_elapsed = stats.finalize_flush_elapsed;
     let _finalize_result_elapsed = stats.finalize_result_elapsed;
+    let _connection_write: BulkLoadConnectionWriteStats = stats.connection_write;
+}
+
+#[test]
+fn external_crate_can_name_bulk_connection_write_stats_api() {
+    let stats = BulkLoadConnectionWriteStats::default();
+
+    let _calls: u64 = stats.calls;
+    let _payload_bytes: u64 = stats.payload_bytes;
+    let _ready_elapsed = stats.ready_elapsed;
+    let _encode_elapsed = stats.encode_elapsed;
+    let _flush_elapsed = stats.flush_elapsed;
+    let _max_ready_elapsed = stats.max_ready_elapsed;
+    let _max_encode_elapsed = stats.max_encode_elapsed;
+    let _max_flush_elapsed = stats.max_flush_elapsed;
+    let _max_payload_bytes: usize = stats.max_payload_bytes;
 }
 
 #[test]
