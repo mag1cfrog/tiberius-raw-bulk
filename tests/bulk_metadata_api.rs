@@ -6,9 +6,9 @@ use std::{
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tiberius::{
-    BulkLoadColumn, BulkLoadColumns, BulkLoadConnectionWriteStats, BulkLoadPacketStats,
-    BulkLoadRequest, BulkLoadStats, BulkLoadWriteTimingStats, Client, ColumnFlag, ColumnType,
-    ExecuteResult, FixedLenType, TypeInfo, VarLenType,
+    BulkLoadColumn, BulkLoadColumns, BulkLoadConnectionWriteStats, BulkLoadDirectPacketWriteStats,
+    BulkLoadPacketStats, BulkLoadRequest, BulkLoadStats, BulkLoadWriteTimingStats, Client,
+    ColumnFlag, ColumnType, ExecuteResult, FixedLenType, TypeInfo, VarLenType,
 };
 
 struct ExternalStream;
@@ -128,6 +128,7 @@ fn external_crate_can_name_bulk_write_timing_stats_api() {
     let _finalize_flush_elapsed = stats.finalize_flush_elapsed;
     let _finalize_result_elapsed = stats.finalize_result_elapsed;
     let _connection_write: BulkLoadConnectionWriteStats = stats.connection_write;
+    let _direct_packet_write: BulkLoadDirectPacketWriteStats = stats.direct_packet_write;
 }
 
 #[test]
@@ -143,6 +144,23 @@ fn external_crate_can_name_bulk_connection_write_stats_api() {
     let _max_encode_elapsed = stats.max_encode_elapsed;
     let _max_flush_elapsed = stats.max_flush_elapsed;
     let _max_payload_bytes: usize = stats.max_payload_bytes;
+}
+
+#[test]
+fn external_crate_can_name_bulk_direct_packet_write_stats_api() {
+    let stats = BulkLoadDirectPacketWriteStats::default();
+
+    let _calls: u64 = stats.calls;
+    let _payload_bytes: u64 = stats.payload_bytes;
+    let _header_bytes: u64 = stats.header_bytes;
+    let _write_calls: u64 = stats.write_calls;
+    let _write_bytes: u64 = stats.write_bytes;
+    let _max_write_bytes: usize = stats.max_write_bytes;
+    let _write_elapsed = stats.write_elapsed;
+    let _max_write_elapsed = stats.max_write_elapsed;
+    let _flush_calls: u64 = stats.flush_calls;
+    let _flush_elapsed = stats.flush_elapsed;
+    let _max_flush_elapsed = stats.max_flush_elapsed;
 }
 
 #[test]
@@ -198,6 +216,17 @@ fn external_crate_can_call_raw_row_apis() {
     }
 
     let _type_check = send_raw;
+}
+
+#[test]
+fn external_crate_can_enable_direct_packet_writes() {
+    fn enable(req: &mut BulkLoadRequest<'_, ExternalStream>) {
+        let _default_enabled: bool = req.direct_packet_writes_enabled();
+        req.enable_direct_packet_writes();
+        let _enabled: bool = req.direct_packet_writes_enabled();
+    }
+
+    let _type_check = enable;
 }
 
 #[test]
