@@ -191,6 +191,8 @@ pub struct BulkLoadWriteTimingStats {
     /// Breakdown of bulk-load connection writes below the coarse
     /// `write_to_wire` aggregate.
     pub connection_write: BulkLoadConnectionWriteStats,
+    /// Experimental raw-bulk direct packet write statistics.
+    pub direct_packet_write: BulkLoadDirectPacketWriteStats,
 }
 
 impl BulkLoadWriteTimingStats {
@@ -292,6 +294,66 @@ impl BulkLoadConnectionWriteStats {
         self.max_encode_elapsed = self.max_encode_elapsed.max(encode_elapsed);
         self.max_flush_elapsed = self.max_flush_elapsed.max(flush_elapsed);
         self.max_payload_bytes = self.max_payload_bytes.max(payload_bytes);
+    }
+}
+
+/// Detailed timing statistics for an experimental raw-bulk direct packet
+/// writer.
+///
+/// These counters are intended to compare an experimental bulk-only packet
+/// writer against the framed sink path. They remain zero when the framed path
+/// is used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkLoadDirectPacketWriteStats {
+    /// Number of TDS packets passed to the direct packet writer.
+    pub calls: u64,
+    /// Payload bytes passed to the direct packet writer, excluding headers.
+    pub payload_bytes: u64,
+    /// Header bytes written by the direct packet writer.
+    pub header_bytes: u64,
+    /// Number of lower-level write calls issued by the direct packet writer.
+    pub write_calls: u64,
+    /// Bytes accepted by lower-level writes, including headers and payloads.
+    pub write_bytes: u64,
+    /// Largest byte count accepted by a single lower-level write.
+    pub max_write_bytes: usize,
+    /// Time spent awaiting lower-level writes.
+    pub write_elapsed: Duration,
+    /// Slowest lower-level write.
+    pub max_write_elapsed: Duration,
+    /// Number of explicit direct packet writer flushes.
+    pub flush_calls: u64,
+    /// Time spent awaiting explicit direct packet writer flushes.
+    pub flush_elapsed: Duration,
+    /// Slowest explicit direct packet writer flush.
+    pub max_flush_elapsed: Duration,
+}
+
+impl BulkLoadDirectPacketWriteStats {
+    fn record_packet(&mut self, payload_bytes: usize, header_bytes: usize) {
+        self.calls = self.calls.saturating_add(1);
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(usize_to_u64_saturating(payload_bytes));
+        self.header_bytes = self
+            .header_bytes
+            .saturating_add(usize_to_u64_saturating(header_bytes));
+    }
+
+    fn record_write(&mut self, bytes: usize, elapsed: Duration) {
+        self.write_calls = self.write_calls.saturating_add(1);
+        self.write_bytes = self
+            .write_bytes
+            .saturating_add(usize_to_u64_saturating(bytes));
+        self.max_write_bytes = self.max_write_bytes.max(bytes);
+        self.write_elapsed += elapsed;
+        self.max_write_elapsed = self.max_write_elapsed.max(elapsed);
+    }
+
+    fn record_flush(&mut self, elapsed: Duration) {
+        self.flush_calls = self.flush_calls.saturating_add(1);
+        self.flush_elapsed += elapsed;
+        self.max_flush_elapsed = self.max_flush_elapsed.max(elapsed);
     }
 }
 
@@ -921,6 +983,10 @@ mod tests {
             stats.connection_write,
             BulkLoadConnectionWriteStats::default()
         );
+        assert_eq!(
+            stats.direct_packet_write,
+            BulkLoadDirectPacketWriteStats::default()
+        );
     }
 
     #[test]
@@ -964,6 +1030,47 @@ mod tests {
         assert_eq!(stats.max_encode_elapsed, Duration::from_millis(5));
         assert_eq!(stats.max_flush_elapsed, Duration::from_millis(13));
         assert_eq!(stats.max_payload_bytes, 256);
+    }
+
+    #[test]
+    fn bulk_load_direct_packet_write_stats_default_to_zero() {
+        let stats = BulkLoadDirectPacketWriteStats::default();
+
+        assert_eq!(stats.calls, 0);
+        assert_eq!(stats.payload_bytes, 0);
+        assert_eq!(stats.header_bytes, 0);
+        assert_eq!(stats.write_calls, 0);
+        assert_eq!(stats.write_bytes, 0);
+        assert_eq!(stats.max_write_bytes, 0);
+        assert_eq!(stats.write_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_write_elapsed, Duration::ZERO);
+        assert_eq!(stats.flush_calls, 0);
+        assert_eq!(stats.flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_flush_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn bulk_load_direct_packet_write_stats_accumulate_and_track_maxima() {
+        let mut stats = BulkLoadDirectPacketWriteStats::default();
+
+        stats.record_packet(128, HEADER_BYTES);
+        stats.record_packet(256, HEADER_BYTES);
+        stats.record_write(64, Duration::from_millis(3));
+        stats.record_write(512, Duration::from_millis(11));
+        stats.record_flush(Duration::from_millis(5));
+        stats.record_flush(Duration::from_millis(7));
+
+        assert_eq!(stats.calls, 2);
+        assert_eq!(stats.payload_bytes, 384);
+        assert_eq!(stats.header_bytes, u64::try_from(HEADER_BYTES * 2).unwrap());
+        assert_eq!(stats.write_calls, 2);
+        assert_eq!(stats.write_bytes, 576);
+        assert_eq!(stats.max_write_bytes, 512);
+        assert_eq!(stats.write_elapsed, Duration::from_millis(14));
+        assert_eq!(stats.max_write_elapsed, Duration::from_millis(11));
+        assert_eq!(stats.flush_calls, 2);
+        assert_eq!(stats.flush_elapsed, Duration::from_millis(12));
+        assert_eq!(stats.max_flush_elapsed, Duration::from_millis(7));
     }
 
     #[test]
