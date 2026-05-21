@@ -230,6 +230,17 @@ impl BulkLoadWriteTimingStats {
     fn record_finalize_result_elapsed(&mut self, elapsed: Duration) {
         self.finalize_result_elapsed += elapsed;
     }
+
+    fn record_connection_write(
+        &mut self,
+        payload_bytes: usize,
+        ready_elapsed: Duration,
+        encode_elapsed: Duration,
+        flush_elapsed: Duration,
+    ) {
+        self.connection_write
+            .record(payload_bytes, ready_elapsed, encode_elapsed, flush_elapsed);
+    }
 }
 
 /// Detailed timing statistics for bulk-load writes through the framed
@@ -527,13 +538,26 @@ where
 
         let data_len = data.len();
         let write_start = Instant::now();
-        let write_result = self.connection.write_to_wire(header, data).await;
+        let write_result = self
+            .connection
+            .write_to_wire_with_timing(header, data)
+            .await;
         let write_elapsed = write_start.elapsed();
         self.write_timing_stats
             .record_write_to_wire(write_elapsed, data_len);
-        self.write_timing_stats
-            .record_finalize_write_to_wire_elapsed(write_elapsed);
-        write_result?;
+        match write_result {
+            Ok(connection_timing) => {
+                self.write_timing_stats.record_connection_write(
+                    data_len,
+                    connection_timing.ready_elapsed,
+                    connection_timing.encode_elapsed,
+                    connection_timing.flush_elapsed,
+                );
+                self.write_timing_stats
+                    .record_finalize_write_to_wire_elapsed(write_elapsed);
+            }
+            Err(err) => return Err(err),
+        }
 
         let flush_start = Instant::now();
         let flush_result = self.connection.flush_sink().await;
@@ -579,10 +603,23 @@ where
 
             let data_len = data.len();
             let write_start = Instant::now();
-            let write_result = self.connection.write_to_wire(header, data).await;
+            let write_result = self
+                .connection
+                .write_to_wire_with_timing(header, data)
+                .await;
             self.write_timing_stats
                 .record_write_to_wire(write_start.elapsed(), data_len);
-            write_result?;
+            match write_result {
+                Ok(connection_timing) => {
+                    self.write_timing_stats.record_connection_write(
+                        data_len,
+                        connection_timing.ready_elapsed,
+                        connection_timing.encode_elapsed,
+                        connection_timing.flush_elapsed,
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         self.packet_stats
@@ -964,6 +1001,12 @@ mod tests {
         stats.record_finalize_write_to_wire_elapsed(Duration::from_millis(37));
         stats.record_finalize_flush_elapsed(Duration::from_millis(41));
         stats.record_finalize_result_elapsed(Duration::from_millis(43));
+        stats.record_connection_write(
+            128,
+            Duration::from_millis(47),
+            Duration::from_millis(53),
+            Duration::from_millis(59),
+        );
 
         assert_eq!(stats.flush_calls, 2);
         assert_eq!(stats.flush_elapsed, Duration::from_millis(42));
@@ -975,6 +1018,20 @@ mod tests {
         );
         assert_eq!(stats.finalize_flush_elapsed, Duration::from_millis(41));
         assert_eq!(stats.finalize_result_elapsed, Duration::from_millis(43));
+        assert_eq!(stats.connection_write.calls, 1);
+        assert_eq!(stats.connection_write.payload_bytes, 128);
+        assert_eq!(
+            stats.connection_write.ready_elapsed,
+            Duration::from_millis(47)
+        );
+        assert_eq!(
+            stats.connection_write.encode_elapsed,
+            Duration::from_millis(53)
+        );
+        assert_eq!(
+            stats.connection_write.flush_elapsed,
+            Duration::from_millis(59)
+        );
     }
 
     #[test]

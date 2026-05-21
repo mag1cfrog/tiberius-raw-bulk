@@ -20,9 +20,10 @@ use asynchronous_codec::Framed;
 use bytes::BytesMut;
 #[cfg(any(windows, feature = "integrated-auth-gssapi"))]
 use codec::TokenSspi;
+use futures_util::future::poll_fn;
 use futures_util::io::{AsyncRead, AsyncWrite};
 use futures_util::ready;
-use futures_util::sink::SinkExt;
+use futures_util::sink::{Sink, SinkExt};
 use futures_util::stream::{Stream, TryStream, TryStreamExt};
 #[cfg(all(unix, feature = "integrated-auth-gssapi"))]
 use libgssapi::{
@@ -57,6 +58,13 @@ where
     flushed: bool,
     context: Context,
     buf: BytesMut,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ConnectionWriteTiming {
+    pub(crate) ready_elapsed: std::time::Duration,
+    pub(crate) encode_elapsed: std::time::Duration,
+    pub(crate) flush_elapsed: std::time::Duration,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
@@ -214,6 +222,39 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.transport.send(packet).await?;
 
         Ok(())
+    }
+
+    /// Sends a packet and reports the framed sink phases hidden by
+    /// [`SinkExt::send`].
+    ///
+    /// This is used by bulk-load benchmarks only. It intentionally mirrors the
+    /// `send` sequence of readiness, encoding, and flush so the measured path
+    /// stays behavior-equivalent to [`write_to_wire`].
+    pub(crate) async fn write_to_wire_with_timing(
+        &mut self,
+        header: PacketHeader,
+        data: BytesMut,
+    ) -> crate::Result<ConnectionWriteTiming> {
+        self.flushed = false;
+
+        let packet = Packet::new(header, data);
+        let ready_start = std::time::Instant::now();
+        poll_fn(|cx| Pin::new(&mut self.transport).poll_ready(cx)).await?;
+        let ready_elapsed = ready_start.elapsed();
+
+        let encode_start = std::time::Instant::now();
+        Pin::new(&mut self.transport).start_send(packet)?;
+        let encode_elapsed = encode_start.elapsed();
+
+        let flush_start = std::time::Instant::now();
+        poll_fn(|cx| Pin::new(&mut self.transport).poll_flush(cx)).await?;
+        let flush_elapsed = flush_start.elapsed();
+
+        Ok(ConnectionWriteTiming {
+            ready_elapsed,
+            encode_elapsed,
+            flush_elapsed,
+        })
     }
 
     /// Sends all pending packages to the wire.
