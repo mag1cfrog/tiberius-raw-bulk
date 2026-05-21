@@ -1,5 +1,18 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.7
+
+- Add request-scoped bulk-load write timing statistics:
+  - `BulkLoadWriteTimingStats`;
+  - `BulkLoadStats`;
+  - `BulkLoadRequest::write_timing_stats()`;
+  - `BulkLoadRequest::stats()`;
+  - `BulkLoadRequest::finalize_with_stats()`.
+- Preserve `BulkLoadRequest::finalize_with_packet_stats()` compatibility.
+- Track bulk-load packet-drain timing, lower-level write timing and payload
+  bytes, flush timing, max write/flush timings, and finalization timing
+  breakdowns for downstream benchmarks.
+
 ## Version 0.12.3-raw-bulk.6
 
 - Add configurable TDS login packet size support:
