@@ -6,8 +6,9 @@ use std::{
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tiberius::{
-    BulkLoadColumn, BulkLoadColumns, BulkLoadPacketStats, BulkLoadRequest, Client, ColumnFlag,
-    ColumnType, ExecuteResult, FixedLenType, TypeInfo, VarLenType,
+    BulkLoadColumn, BulkLoadColumns, BulkLoadPacketStats, BulkLoadRequest, BulkLoadStats,
+    BulkLoadWriteTimingStats, Client, ColumnFlag, ColumnType, ExecuteResult, FixedLenType,
+    TypeInfo, VarLenType,
 };
 
 struct ExternalStream;
@@ -55,6 +56,8 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
         let columns = req.columns();
         let _column_count = columns.len();
         let _stats: BulkLoadPacketStats = req.packet_stats();
+        let _timing: BulkLoadWriteTimingStats = req.write_timing_stats();
+        let _all_stats: BulkLoadStats = req.stats();
 
         for column in columns {
             inspect_column(column);
@@ -105,6 +108,33 @@ fn external_crate_can_name_bulk_packet_stats_api() {
     let _max_buffered: usize = stats.max_buffered_bytes_before_write;
     let _tail: usize = stats.buffered_bytes_after_last_write;
     let _final_payload: usize = stats.finalized_packet_payload_bytes;
+}
+
+#[test]
+fn external_crate_can_name_bulk_write_timing_stats_api() {
+    let stats = BulkLoadWriteTimingStats::default();
+
+    let _write_packets_elapsed = stats.write_packets_elapsed;
+    let _write_calls: u64 = stats.write_to_wire_calls;
+    let _write_elapsed = stats.write_to_wire_elapsed;
+    let _write_bytes: u64 = stats.write_to_wire_payload_bytes;
+    let _max_write_elapsed = stats.max_write_to_wire_elapsed;
+    let _max_write_bytes: usize = stats.max_write_to_wire_payload_bytes;
+    let _flush_calls: u64 = stats.flush_calls;
+    let _flush_elapsed = stats.flush_elapsed;
+    let _max_flush_elapsed = stats.max_flush_elapsed;
+    let _finalize_elapsed = stats.finalize_elapsed;
+    let _finalize_write_elapsed = stats.finalize_write_to_wire_elapsed;
+    let _finalize_flush_elapsed = stats.finalize_flush_elapsed;
+    let _finalize_result_elapsed = stats.finalize_result_elapsed;
+}
+
+#[test]
+fn external_crate_can_name_combined_bulk_stats_api() {
+    let stats = BulkLoadStats::default();
+
+    let _packet: BulkLoadPacketStats = stats.packet;
+    let _timing: BulkLoadWriteTimingStats = stats.write_timing;
 }
 
 #[test]
@@ -160,6 +190,17 @@ fn external_crate_can_finalize_with_packet_stats() {
         req: BulkLoadRequest<'_, ExternalStream>,
     ) -> tiberius::Result<(ExecuteResult, BulkLoadPacketStats)> {
         req.finalize_with_packet_stats().await
+    }
+
+    let _type_check = finish_with_stats;
+}
+
+#[test]
+fn external_crate_can_finalize_with_combined_bulk_stats() {
+    async fn finish_with_stats(
+        req: BulkLoadRequest<'_, ExternalStream>,
+    ) -> tiberius::Result<(ExecuteResult, BulkLoadStats)> {
+        req.finalize_with_stats().await
     }
 
     let _type_check = finish_with_stats;
