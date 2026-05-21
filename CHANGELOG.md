@@ -1,5 +1,17 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.9
+
+- Add an opt-in raw bulk direct packet writer for benchmark comparison:
+  - `BulkLoadRequest::enable_direct_packet_writes()`;
+  - `BulkLoadRequest::direct_packet_writes_enabled()`;
+  - `BulkLoadDirectPacketWriteStats`;
+  - `BulkLoadWriteTimingStats::direct_packet_write`.
+- Keep the default raw bulk path and all normal query writes on the existing
+  framed packet sink.
+- Preserve TDS packet framing in the direct path by serializing the same packet
+  header type, status, id, and payload bytes without introducing unsafe code.
+
 ## Version 0.12.3-raw-bulk.8
 
 - Add deeper raw bulk connection-write timing statistics:

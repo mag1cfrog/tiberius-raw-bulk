@@ -127,6 +127,28 @@ impl PacketHeader {
     pub fn length(&self) -> u16 {
         self.length
     }
+
+    pub(crate) fn encode_for_payload<B>(
+        mut self,
+        payload_len: usize,
+        dst: &mut B,
+    ) -> crate::Result<()>
+    where
+        B: BufMut,
+    {
+        let packet_len = payload_len
+            .checked_add(crate::tds::HEADER_BYTES)
+            .ok_or_else(|| {
+                Error::Protocol("packet length overflow while encoding header".into())
+            })?;
+
+        let length = u16::try_from(packet_len).map_err(|_| {
+            Error::Protocol(format!("packet length exceeds TDS u16 limit: {packet_len}").into())
+        })?;
+
+        self.length = length;
+        self.encode(dst)
+    }
 }
 
 impl<B> Encode<B> for PacketHeader
@@ -142,6 +164,67 @@ where
         dst.put_u8(self.window);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PacketHeader, PacketStatus, PacketType};
+    use crate::tds::HEADER_BYTES;
+    use bytes::BytesMut;
+
+    #[test]
+    fn encode_for_payload_writes_bulk_header_with_payload_length() {
+        let payload_len = 32usize;
+        let mut header = PacketHeader::bulk_load(7);
+        header.set_status(PacketStatus::NormalMessage);
+        let mut encoded = BytesMut::new();
+
+        header
+            .encode_for_payload(payload_len, &mut encoded)
+            .expect("header should encode");
+
+        assert_eq!(encoded.len(), HEADER_BYTES);
+        assert_eq!(encoded[0], PacketType::BulkLoad as u8);
+        assert_eq!(encoded[1], PacketStatus::NormalMessage as u8);
+        assert_eq!(
+            u16::from_be_bytes([encoded[2], encoded[3]]),
+            u16::try_from(payload_len + HEADER_BYTES).unwrap()
+        );
+        assert_eq!(&encoded[4..6], &[0, 0]);
+        assert_eq!(encoded[6], 7);
+        assert_eq!(encoded[7], 0);
+    }
+
+    #[test]
+    fn encode_for_payload_preserves_end_of_message_status() {
+        let mut header = PacketHeader::bulk_load(11);
+        header.set_status(PacketStatus::EndOfMessage);
+        let mut encoded = BytesMut::new();
+
+        header
+            .encode_for_payload(0, &mut encoded)
+            .expect("header should encode");
+
+        assert_eq!(encoded[1], PacketStatus::EndOfMessage as u8);
+        assert_eq!(
+            u16::from_be_bytes([encoded[2], encoded[3]]),
+            u16::try_from(HEADER_BYTES).unwrap()
+        );
+        assert_eq!(encoded[6], 11);
+    }
+
+    #[test]
+    fn encode_for_payload_rejects_oversized_packet_length() {
+        let header = PacketHeader::bulk_load(1);
+        let mut encoded = BytesMut::new();
+
+        let err = header
+            .encode_for_payload(u16::MAX as usize, &mut encoded)
+            .expect_err("oversized packet should fail");
+
+        assert!(err.to_string().contains("packet length exceeds"));
+        assert!(encoded.is_empty());
     }
 }
 

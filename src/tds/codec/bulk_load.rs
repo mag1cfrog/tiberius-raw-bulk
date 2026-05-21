@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use tracing::{event, Level};
 
 use crate::{
-    client::Connection, sql_read_bytes::SqlReadBytes, BytesMutWithDataColumns, ColumnFlag,
-    ColumnType, ExecuteResult,
+    client::{Connection, DirectPacketWriteTiming},
+    sql_read_bytes::SqlReadBytes,
+    BytesMutWithDataColumns, ColumnFlag, ColumnType, ExecuteResult,
 };
 
 use super::{
@@ -191,6 +192,8 @@ pub struct BulkLoadWriteTimingStats {
     /// Breakdown of bulk-load connection writes below the coarse
     /// `write_to_wire` aggregate.
     pub connection_write: BulkLoadConnectionWriteStats,
+    /// Experimental raw-bulk direct packet write statistics.
+    pub direct_packet_write: BulkLoadDirectPacketWriteStats,
 }
 
 impl BulkLoadWriteTimingStats {
@@ -240,6 +243,19 @@ impl BulkLoadWriteTimingStats {
     ) {
         self.connection_write
             .record(payload_bytes, ready_elapsed, encode_elapsed, flush_elapsed);
+    }
+
+    fn record_direct_packet_write(&mut self, timing: DirectPacketWriteTiming) {
+        self.direct_packet_write
+            .record_packet(timing.payload_bytes, timing.header_bytes);
+        self.direct_packet_write.record_write_summary(
+            timing.write_calls,
+            timing.write_bytes,
+            timing.max_write_bytes,
+            timing.write_elapsed,
+            timing.max_write_elapsed,
+        );
+        self.direct_packet_write.record_flush(timing.flush_elapsed);
     }
 }
 
@@ -295,6 +311,71 @@ impl BulkLoadConnectionWriteStats {
     }
 }
 
+/// Detailed timing statistics for an experimental raw-bulk direct packet
+/// writer.
+///
+/// These counters are intended to compare an experimental bulk-only packet
+/// writer against the framed sink path. They remain zero when the framed path
+/// is used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BulkLoadDirectPacketWriteStats {
+    /// Number of TDS packets passed to the direct packet writer.
+    pub calls: u64,
+    /// Payload bytes passed to the direct packet writer, excluding headers.
+    pub payload_bytes: u64,
+    /// Header bytes written by the direct packet writer.
+    pub header_bytes: u64,
+    /// Number of lower-level write calls issued by the direct packet writer.
+    pub write_calls: u64,
+    /// Bytes accepted by lower-level writes, including headers and payloads.
+    pub write_bytes: u64,
+    /// Largest byte count accepted by a single lower-level write.
+    pub max_write_bytes: usize,
+    /// Time spent awaiting lower-level writes.
+    pub write_elapsed: Duration,
+    /// Slowest lower-level write.
+    pub max_write_elapsed: Duration,
+    /// Number of explicit direct packet writer flushes.
+    pub flush_calls: u64,
+    /// Time spent awaiting explicit direct packet writer flushes.
+    pub flush_elapsed: Duration,
+    /// Slowest explicit direct packet writer flush.
+    pub max_flush_elapsed: Duration,
+}
+
+impl BulkLoadDirectPacketWriteStats {
+    fn record_packet(&mut self, payload_bytes: usize, header_bytes: usize) {
+        self.calls = self.calls.saturating_add(1);
+        self.payload_bytes = self
+            .payload_bytes
+            .saturating_add(usize_to_u64_saturating(payload_bytes));
+        self.header_bytes = self
+            .header_bytes
+            .saturating_add(usize_to_u64_saturating(header_bytes));
+    }
+
+    fn record_write_summary(
+        &mut self,
+        calls: u64,
+        bytes: u64,
+        max_bytes: usize,
+        elapsed: Duration,
+        max_elapsed: Duration,
+    ) {
+        self.write_calls = self.write_calls.saturating_add(calls);
+        self.write_bytes = self.write_bytes.saturating_add(bytes);
+        self.max_write_bytes = self.max_write_bytes.max(max_bytes);
+        self.write_elapsed += elapsed;
+        self.max_write_elapsed = self.max_write_elapsed.max(max_elapsed);
+    }
+
+    fn record_flush(&mut self, elapsed: Duration) {
+        self.flush_calls = self.flush_calls.saturating_add(1);
+        self.flush_elapsed += elapsed;
+        self.max_flush_elapsed = self.max_flush_elapsed.max(elapsed);
+    }
+}
+
 /// Complete benchmark statistics collected by a bulk-load request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BulkLoadStats {
@@ -316,6 +397,7 @@ where
     columns: Vec<MetaDataColumn<'a>>,
     packet_stats: BulkLoadPacketStats,
     write_timing_stats: BulkLoadWriteTimingStats,
+    direct_packet_writes: bool,
 }
 
 impl<'a, S> BulkLoadRequest<'a, S>
@@ -342,6 +424,7 @@ where
             columns,
             packet_stats: BulkLoadPacketStats::default(),
             write_timing_stats: BulkLoadWriteTimingStats::default(),
+            direct_packet_writes: false,
         };
 
         Ok(this)
@@ -376,6 +459,23 @@ where
             packet: self.packet_stats,
             write_timing: self.write_timing_stats,
         }
+    }
+
+    /// Enables the experimental direct packet write path for this bulk-load
+    /// request.
+    ///
+    /// The default path uses Tiberius' framed packet sink. This opt-in path is
+    /// intended for benchmark comparisons only: it preserves TDS packet framing
+    /// while writing raw bulk packets directly to the underlying transport.
+    /// Normal query writes and requests that do not call this method continue
+    /// using the framed sink path.
+    pub fn enable_direct_packet_writes(&mut self) {
+        self.direct_packet_writes = true;
+    }
+
+    /// Returns true if this request uses the experimental direct packet writer.
+    pub fn direct_packet_writes_enabled(&self) -> bool {
+        self.direct_packet_writes
     }
 
     /// Adds a new row to the bulk insert, flushing only when having a full packet of data.
@@ -538,21 +638,34 @@ where
 
         let data_len = data.len();
         let write_start = Instant::now();
-        let write_result = self
-            .connection
-            .write_to_wire_with_timing(header, data)
-            .await;
+        let write_result = if self.direct_packet_writes {
+            self.connection
+                .write_direct_packet_with_timing(header, &data)
+                .await
+                .map(EitherWriteTiming::Direct)
+        } else {
+            self.connection
+                .write_to_wire_with_timing(header, data)
+                .await
+                .map(EitherWriteTiming::Framed)
+        };
         let write_elapsed = write_start.elapsed();
         self.write_timing_stats
             .record_write_to_wire(write_elapsed, data_len);
         match write_result {
-            Ok(connection_timing) => {
+            Ok(EitherWriteTiming::Framed(connection_timing)) => {
                 self.write_timing_stats.record_connection_write(
                     data_len,
                     connection_timing.ready_elapsed,
                     connection_timing.encode_elapsed,
                     connection_timing.flush_elapsed,
                 );
+                self.write_timing_stats
+                    .record_finalize_write_to_wire_elapsed(write_elapsed);
+            }
+            Ok(EitherWriteTiming::Direct(direct_timing)) => {
+                self.write_timing_stats
+                    .record_direct_packet_write(direct_timing);
                 self.write_timing_stats
                     .record_finalize_write_to_wire_elapsed(write_elapsed);
             }
@@ -580,13 +693,17 @@ where
 
     async fn write_packets(&mut self) -> crate::Result<()> {
         let write_packets_start = Instant::now();
-        let result = self.write_packets_inner().await;
+        let result = if self.direct_packet_writes {
+            self.write_packets_direct_inner().await
+        } else {
+            self.write_packets_framed_inner().await
+        };
         self.write_timing_stats
             .record_write_packets_elapsed(write_packets_start.elapsed());
         result
     }
 
-    async fn write_packets_inner(&mut self) -> crate::Result<()> {
+    async fn write_packets_framed_inner(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
         self.packet_stats.record_write_packets_call(self.buf.len());
 
@@ -627,6 +744,48 @@ where
 
         Ok(())
     }
+
+    async fn write_packets_direct_inner(&mut self) -> crate::Result<()> {
+        let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
+        self.packet_stats.record_write_packets_call(self.buf.len());
+
+        while self.buf.len() > packet_size {
+            let header = PacketHeader::bulk_load(self.packet_id);
+            let data = self.buf.split_to(packet_size);
+            self.packet_stats.record_packet_written(data.len());
+
+            event!(
+                Level::TRACE,
+                "Bulk insert direct packet ({} bytes)",
+                data.len() + HEADER_BYTES,
+            );
+
+            let data_len = data.len();
+            let write_start = Instant::now();
+            let write_result = self
+                .connection
+                .write_direct_packet_with_timing(header, &data)
+                .await;
+            self.write_timing_stats
+                .record_write_to_wire(write_start.elapsed(), data_len);
+            match write_result {
+                Ok(direct_timing) => self
+                    .write_timing_stats
+                    .record_direct_packet_write(direct_timing),
+                Err(err) => return Err(err),
+            }
+        }
+
+        self.packet_stats
+            .record_buffered_bytes_after_write(self.buf.len());
+
+        Ok(())
+    }
+}
+
+enum EitherWriteTiming {
+    Framed(crate::client::ConnectionWriteTiming),
+    Direct(DirectPacketWriteTiming),
 }
 
 fn bulk_load_columns<'a>(
@@ -921,6 +1080,10 @@ mod tests {
             stats.connection_write,
             BulkLoadConnectionWriteStats::default()
         );
+        assert_eq!(
+            stats.direct_packet_write,
+            BulkLoadDirectPacketWriteStats::default()
+        );
     }
 
     #[test]
@@ -964,6 +1127,52 @@ mod tests {
         assert_eq!(stats.max_encode_elapsed, Duration::from_millis(5));
         assert_eq!(stats.max_flush_elapsed, Duration::from_millis(13));
         assert_eq!(stats.max_payload_bytes, 256);
+    }
+
+    #[test]
+    fn bulk_load_direct_packet_write_stats_default_to_zero() {
+        let stats = BulkLoadDirectPacketWriteStats::default();
+
+        assert_eq!(stats.calls, 0);
+        assert_eq!(stats.payload_bytes, 0);
+        assert_eq!(stats.header_bytes, 0);
+        assert_eq!(stats.write_calls, 0);
+        assert_eq!(stats.write_bytes, 0);
+        assert_eq!(stats.max_write_bytes, 0);
+        assert_eq!(stats.write_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_write_elapsed, Duration::ZERO);
+        assert_eq!(stats.flush_calls, 0);
+        assert_eq!(stats.flush_elapsed, Duration::ZERO);
+        assert_eq!(stats.max_flush_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn bulk_load_direct_packet_write_stats_accumulate_and_track_maxima() {
+        let mut stats = BulkLoadDirectPacketWriteStats::default();
+
+        stats.record_packet(128, HEADER_BYTES);
+        stats.record_packet(256, HEADER_BYTES);
+        stats.record_write_summary(
+            2,
+            576,
+            512,
+            Duration::from_millis(14),
+            Duration::from_millis(11),
+        );
+        stats.record_flush(Duration::from_millis(5));
+        stats.record_flush(Duration::from_millis(7));
+
+        assert_eq!(stats.calls, 2);
+        assert_eq!(stats.payload_bytes, 384);
+        assert_eq!(stats.header_bytes, u64::try_from(HEADER_BYTES * 2).unwrap());
+        assert_eq!(stats.write_calls, 2);
+        assert_eq!(stats.write_bytes, 576);
+        assert_eq!(stats.max_write_bytes, 512);
+        assert_eq!(stats.write_elapsed, Duration::from_millis(14));
+        assert_eq!(stats.max_write_elapsed, Duration::from_millis(11));
+        assert_eq!(stats.flush_calls, 2);
+        assert_eq!(stats.flush_elapsed, Duration::from_millis(12));
+        assert_eq!(stats.max_flush_elapsed, Duration::from_millis(7));
     }
 
     #[test]

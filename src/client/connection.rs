@@ -67,6 +67,18 @@ pub(crate) struct ConnectionWriteTiming {
     pub(crate) flush_elapsed: std::time::Duration,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DirectPacketWriteTiming {
+    pub(crate) header_bytes: usize,
+    pub(crate) payload_bytes: usize,
+    pub(crate) write_calls: u64,
+    pub(crate) write_bytes: u64,
+    pub(crate) max_write_bytes: usize,
+    pub(crate) write_elapsed: std::time::Duration,
+    pub(crate) max_write_elapsed: std::time::Duration,
+    pub(crate) flush_elapsed: std::time::Duration,
+}
+
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connection")
@@ -255,6 +267,67 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             encode_elapsed,
             flush_elapsed,
         })
+    }
+
+    pub(crate) async fn write_direct_packet_with_timing(
+        &mut self,
+        header: PacketHeader,
+        payload: &[u8],
+    ) -> crate::Result<DirectPacketWriteTiming> {
+        self.flushed = false;
+
+        let mut header_bytes = BytesMut::with_capacity(HEADER_BYTES);
+        header.encode_for_payload(payload.len(), &mut header_bytes)?;
+
+        let mut timing = DirectPacketWriteTiming {
+            header_bytes: header_bytes.len(),
+            payload_bytes: payload.len(),
+            ..DirectPacketWriteTiming::default()
+        };
+
+        // This benchmark-only path bypasses the framed packet sink and writes
+        // a complete TDS packet directly to the underlying stream. Callers must
+        // use it only when no framed packet bytes are buffered.
+        Self::write_all_direct_packet_bytes(&mut self.transport, &header_bytes, &mut timing)
+            .await?;
+        Self::write_all_direct_packet_bytes(&mut self.transport, payload, &mut timing).await?;
+
+        let flush_start = std::time::Instant::now();
+        poll_fn(|cx| Pin::new(&mut *self.transport).poll_flush(cx)).await?;
+        timing.flush_elapsed = flush_start.elapsed();
+
+        Ok(timing)
+    }
+
+    async fn write_all_direct_packet_bytes(
+        stream: &mut MaybeTlsStream<S>,
+        mut bytes: &[u8],
+        timing: &mut DirectPacketWriteTiming,
+    ) -> crate::Result<()> {
+        while !bytes.is_empty() {
+            let write_start = std::time::Instant::now();
+            let written = poll_fn(|cx| Pin::new(&mut *stream).poll_write(cx, bytes)).await?;
+            let elapsed = write_start.elapsed();
+
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to write direct TDS packet bytes",
+                )
+                .into());
+            }
+
+            timing.write_calls = timing.write_calls.saturating_add(1);
+            timing.write_bytes = timing
+                .write_bytes
+                .saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
+            timing.max_write_bytes = timing.max_write_bytes.max(written);
+            timing.write_elapsed += elapsed;
+            timing.max_write_elapsed = timing.max_write_elapsed.max(elapsed);
+            bytes = &bytes[written..];
+        }
+
+        Ok(())
     }
 
     /// Sends all pending packages to the wire.

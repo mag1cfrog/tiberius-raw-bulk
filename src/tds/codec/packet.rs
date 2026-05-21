@@ -1,4 +1,4 @@
-use super::{Decode, Encode, PacketHeader, PacketStatus, HEADER_BYTES};
+use super::{Decode, Encode, PacketHeader, PacketStatus};
 use bytes::BytesMut;
 
 #[derive(Debug)]
@@ -23,13 +23,8 @@ impl Packet {
 
 impl Encode<BytesMut> for Packet {
     fn encode(self, dst: &mut BytesMut) -> crate::Result<()> {
-        let size = (self.payload.len() as u16 + HEADER_BYTES as u16).to_be_bytes();
-
-        self.header.encode(dst)?;
+        self.header.encode_for_payload(self.payload.len(), dst)?;
         dst.extend(self.payload);
-
-        dst[2] = size[0];
-        dst[3] = size[1];
 
         Ok(())
     }
