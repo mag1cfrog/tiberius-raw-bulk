@@ -567,6 +567,42 @@ where
     direct_packet_writes: bool,
 }
 
+// Direct packet mode keeps the pending buffer shaped as:
+//
+//   [8-byte header slot][pending payload bytes...]
+//
+// Normal framed mode keeps only payload bytes in the buffer. Switching to
+// direct mode copies the current payload once so later packet writes can patch
+// headers in place.
+fn replace_with_direct_packet_buffer(buf: &mut BytesMut) {
+    let payload = buf.split();
+    let mut packet_buf = BytesMut::with_capacity(HEADER_BYTES.saturating_add(payload.len()));
+    packet_buf.resize(HEADER_BYTES, 0);
+    packet_buf.extend_from_slice(&payload);
+    *buf = packet_buf;
+}
+
+fn direct_packet_payload_len(buf: &BytesMut) -> usize {
+    buf.len().saturating_sub(HEADER_BYTES)
+}
+
+fn encode_direct_packet_header(
+    buf: &mut BytesMut,
+    packet_id: u8,
+    header_start: usize,
+    payload_len: usize,
+    status: PacketStatus,
+) -> crate::Result<()> {
+    // `header_start` may point at bytes from an already-sent packet. That is
+    // intentional: once those bytes are on the wire, the buffer space can be
+    // reused as the header slot for the next contiguous packet write.
+    let mut header = PacketHeader::bulk_load(packet_id);
+    header.set_status(status);
+    let header_end = header_start.saturating_add(HEADER_BYTES);
+    let mut header_buf = &mut buf[header_start..header_end];
+    header.encode_for_payload(payload_len, &mut header_buf)
+}
+
 impl<'a, S> BulkLoadRequest<'a, S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -634,15 +670,42 @@ where
     /// The default path uses Tiberius' framed packet sink. This opt-in path is
     /// intended for benchmark comparisons only: it preserves TDS packet framing
     /// while writing raw bulk packets directly to the underlying transport.
+    ///
+    /// Direct mode changes the internal pending buffer from payload-only bytes
+    /// to a header-prefixed packet buffer. The first 8 bytes are reserved for a
+    /// TDS header and are filled immediately before writing each packet.
+    ///
     /// Normal query writes and requests that do not call this method continue
     /// using the framed sink path.
     pub fn enable_direct_packet_writes(&mut self) {
-        self.direct_packet_writes = true;
+        if !self.direct_packet_writes {
+            replace_with_direct_packet_buffer(&mut self.buf);
+            self.direct_packet_writes = true;
+        }
     }
 
     /// Returns true if this request uses the experimental direct packet writer.
     pub fn direct_packet_writes_enabled(&self) -> bool {
         self.direct_packet_writes
+    }
+
+    fn direct_payload_len(&self) -> usize {
+        direct_packet_payload_len(&self.buf)
+    }
+
+    fn encode_direct_packet_header_at(
+        &mut self,
+        header_start: usize,
+        payload_len: usize,
+        status: PacketStatus,
+    ) -> crate::Result<()> {
+        encode_direct_packet_header(
+            &mut self.buf,
+            self.packet_id,
+            header_start,
+            payload_len,
+            status,
+        )
     }
 
     /// Adds a new row to the bulk insert, flushing only when having a full packet of data.
@@ -791,24 +854,30 @@ where
         TokenDone::default().encode(&mut self.buf)?;
         self.write_packets().await?;
 
-        let mut header = PacketHeader::bulk_load(self.packet_id);
-        header.set_status(PacketStatus::EndOfMessage);
-
         let data = self.buf.split();
-        self.packet_stats.record_finalized_packet(data.len());
+        let data_len = if self.direct_packet_writes {
+            data.len().saturating_sub(HEADER_BYTES)
+        } else {
+            data.len()
+        };
+        self.packet_stats.record_finalized_packet(data_len);
 
         event!(
             Level::TRACE,
             "Finalizing a bulk insert ({} bytes)",
-            data.len() + HEADER_BYTES,
+            data_len + HEADER_BYTES,
         );
 
-        let data_len = data.len();
         let write_start = Instant::now();
         if self.direct_packet_writes {
+            let mut data = data;
+            let mut header = PacketHeader::bulk_load(self.packet_id);
+            header.set_status(PacketStatus::EndOfMessage);
+            let mut header_buf = &mut data[..HEADER_BYTES];
+            header.encode_for_payload(data_len, &mut header_buf)?;
             let write_result = self
                 .connection
-                .write_direct_packet_with_timing(header, &data)
+                .write_direct_packet_buffer_with_timing(&data)
                 .await;
             let write_elapsed = write_start.elapsed();
             self.write_timing_stats
@@ -823,6 +892,8 @@ where
                 Err(err) => return Err(err),
             }
         } else {
+            let mut header = PacketHeader::bulk_load(self.packet_id);
+            header.set_status(PacketStatus::EndOfMessage);
             let write_result = self
                 .connection
                 .write_to_wire_with_timing(header, data)
@@ -920,37 +991,66 @@ where
 
     async fn write_packets_direct_inner(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
-        self.packet_stats.record_write_packets_call(self.buf.len());
+        self.packet_stats
+            .record_write_packets_call(self.direct_payload_len());
 
-        while self.buf.len() > packet_size {
-            let header = PacketHeader::bulk_load(self.packet_id);
-            let data = self.buf.split_to(packet_size);
-            self.packet_stats.record_packet_written(data.len());
+        let mut payload_start = HEADER_BYTES;
+        let mut payload_remaining = self.direct_payload_len();
+        let mut sent_packets = false;
+
+        while payload_remaining > packet_size {
+            // The first packet uses the reserved header slot at byte 0. Later
+            // packets put their header in the 8 bytes immediately before the
+            // next payload chunk. Those bytes belonged to an earlier packet
+            // that has already been written, so overwriting them is safe and
+            // avoids building a fresh header-plus-payload buffer per packet.
+            let header_start = payload_start - HEADER_BYTES;
+            let packet_end = payload_start + packet_size;
+            self.encode_direct_packet_header_at(
+                header_start,
+                packet_size,
+                PacketStatus::NormalMessage,
+            )?;
+            self.packet_stats.record_packet_written(packet_size);
 
             event!(
                 Level::TRACE,
                 "Bulk insert direct packet ({} bytes)",
-                data.len() + HEADER_BYTES,
+                packet_size + HEADER_BYTES,
             );
 
-            let data_len = data.len();
             let write_start = Instant::now();
             let write_result = self
                 .connection
-                .write_direct_packet_with_timing(header, &data)
+                .write_direct_packet_buffer_with_timing(&self.buf[header_start..packet_end])
                 .await;
             self.write_timing_stats
-                .record_write_to_wire(write_start.elapsed(), data_len);
+                .record_write_to_wire(write_start.elapsed(), packet_size);
             match write_result {
                 Ok(direct_timing) => self
                     .write_timing_stats
                     .record_direct_packet_write(direct_timing),
                 Err(err) => return Err(err),
             }
+
+            sent_packets = true;
+            payload_start += packet_size;
+            payload_remaining -= packet_size;
+        }
+
+        if sent_packets {
+            // Only the unsent tail remains relevant after the loop. It is at
+            // most one packet payload, so copying it behind a fresh header slot
+            // avoids the per-packet copy while preserving the direct-mode
+            // buffer invariant for the next append or final packet.
+            let remaining = self.buf.split_off(payload_start);
+            self.buf.clear();
+            self.buf = remaining;
+            replace_with_direct_packet_buffer(&mut self.buf);
         }
 
         self.packet_stats
-            .record_buffered_bytes_after_write(self.buf.len());
+            .record_buffered_bytes_after_write(self.direct_payload_len());
 
         Ok(())
     }
@@ -1149,7 +1249,7 @@ mod tests {
     use std::borrow::Cow;
 
     use super::*;
-    use crate::tds::codec::{BaseMetaDataColumn, FixedLenType};
+    use crate::tds::codec::{BaseMetaDataColumn, Decode, FixedLenType};
 
     #[test]
     fn exposes_bulk_load_column_metadata() {
@@ -1173,6 +1273,55 @@ mod tests {
         assert!(column.is_updateable());
         assert!(column.flags().contains(ColumnFlag::Nullable));
         assert_eq!(&TypeInfo::FixedLen(FixedLenType::Int4), column.type_info());
+    }
+
+    #[test]
+    fn direct_packet_buffer_reserves_header_prefix() {
+        let mut buf = BytesMut::from(&b"payload"[..]);
+
+        replace_with_direct_packet_buffer(&mut buf);
+
+        assert_eq!(direct_packet_payload_len(&buf), 7);
+        assert_eq!(&buf[..HEADER_BYTES], &[0_u8; HEADER_BYTES]);
+        assert_eq!(&buf[HEADER_BYTES..], b"payload");
+    }
+
+    #[test]
+    fn direct_packet_header_overwrites_already_sent_bytes() {
+        let packet_payload_len = 4;
+        let mut buf = BytesMut::from(&[0_u8; HEADER_BYTES][..]);
+        buf.extend_from_slice(b"aaaabbbbcc");
+
+        encode_direct_packet_header(
+            &mut buf,
+            7,
+            0,
+            packet_payload_len,
+            PacketStatus::NormalMessage,
+        )
+        .expect("first packet header should encode");
+        encode_direct_packet_header(
+            &mut buf,
+            7,
+            packet_payload_len,
+            packet_payload_len,
+            PacketStatus::NormalMessage,
+        )
+        .expect("second packet header should encode over previous bytes");
+
+        let second_header_start = packet_payload_len;
+        let second_payload_start = second_header_start + HEADER_BYTES;
+        let header = PacketHeader::decode(&mut BytesMut::from(
+            &buf[second_header_start..second_payload_start],
+        ))
+        .expect("overwritten bytes should decode as a packet header");
+
+        assert_eq!(header.length(), (HEADER_BYTES + packet_payload_len) as u16);
+        assert_eq!(header.status(), PacketStatus::NormalMessage);
+        assert_eq!(
+            &buf[second_payload_start..second_payload_start + packet_payload_len],
+            b"bbbb"
+        );
     }
 
     #[test]

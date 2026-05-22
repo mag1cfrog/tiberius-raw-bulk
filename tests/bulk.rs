@@ -24,6 +24,11 @@ static CONN_STR: Lazy<String> = Lazy::new(|| {
     })
 });
 
+static ENCRYPTED_CONN_STR: Lazy<String> = Lazy::new(|| format!("{};encrypt=true", *CONN_STR));
+
+static PLAIN_TEXT_CONN_STR: Lazy<String> =
+    Lazy::new(|| format!("{};encrypt=DANGER_PLAINTEXT", *CONN_STR));
+
 thread_local! {
     static NAMES: RefCell<Option<Generator<'static>>> =
     RefCell::new(None);
@@ -184,6 +189,105 @@ where
     assert_eq!(vec![7, 11], values);
 
     Ok(())
+}
+
+async fn direct_packet_bulk_insert_sends_split_packets<S>(
+    mut conn: tiberius::Client<S>,
+    expect_tls: bool,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    const ROWS: usize = 64;
+    const PAYLOAD_LEN: usize = 2048;
+
+    let table = format!("##{}", random_table().await);
+
+    conn.execute(
+        &format!(
+            "CREATE TABLE {table} (id INT IDENTITY PRIMARY KEY, content VARBINARY(MAX) NOT NULL)"
+        ),
+        &[],
+    )
+    .await?;
+
+    let mut req = conn.bulk_insert(&table).await?;
+    req.enable_direct_packet_writes();
+
+    let payloads: Vec<Vec<u8>> = (0..ROWS)
+        .map(|value| vec![u8::try_from(value % 251).unwrap(); PAYLOAD_LEN])
+        .collect();
+
+    for payload in &payloads {
+        let mut row = TokenRow::new();
+        row.push(payload.as_slice().into_sql());
+        req.send(row).await?;
+    }
+
+    let (res, stats) = req.finalize_with_stats().await?;
+
+    assert_eq!(ROWS as u64, res.total());
+    assert!(
+        stats.packet.packets_written > 0,
+        "test payload should force split TDS packets",
+    );
+    assert!(
+        stats.write_timing.direct_packet_write.calls > 1,
+        "direct packet writer should see multiple packets",
+    );
+    if expect_tls {
+        assert_eq!(0, stats.write_timing.direct_packet_write.raw_stream_calls);
+        assert!(
+            stats.write_timing.direct_packet_write.tls_stream_calls > 1,
+            "encrypted direct packet writes should use the TLS stream path",
+        );
+    } else {
+        assert!(
+            stats.write_timing.direct_packet_write.raw_stream_calls > 1,
+            "plaintext direct packet writes should use the raw stream path",
+        );
+        assert_eq!(0, stats.write_timing.direct_packet_write.tls_stream_calls);
+    }
+
+    let row = conn
+        .query(
+            format!(
+                "SELECT COUNT(*), CAST(SUM(DATALENGTH(content)) AS BIGINT), \
+                 MIN(DATALENGTH(content)), MAX(DATALENGTH(content)) FROM {table}",
+            ),
+            &[],
+        )
+        .await?
+        .into_row()
+        .await?
+        .unwrap();
+
+    assert_eq!(Some(ROWS as i32), row.get(0));
+    assert_eq!(Some((ROWS * PAYLOAD_LEN) as i64), row.get(1));
+    assert_eq!(Some(PAYLOAD_LEN as i64), row.get(2));
+    assert_eq!(Some(PAYLOAD_LEN as i64), row.get(3));
+
+    Ok(())
+}
+
+#[test_on_runtimes(connection_string = "PLAIN_TEXT_CONN_STR")]
+async fn direct_packet_bulk_insert_sends_split_packets_plaintext<S>(
+    conn: tiberius::Client<S>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    direct_packet_bulk_insert_sends_split_packets(conn, false).await
+}
+
+#[test_on_runtimes(connection_string = "ENCRYPTED_CONN_STR")]
+async fn direct_packet_bulk_insert_sends_split_packets_encrypted<S>(
+    conn: tiberius::Client<S>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    direct_packet_bulk_insert_sends_split_packets(conn, true).await
 }
 
 test_bulk_type!(empty_varchar(

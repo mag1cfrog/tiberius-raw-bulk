@@ -324,19 +324,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         })
     }
 
-    pub(crate) async fn write_direct_packet_with_timing(
+    /// Writes one complete direct TDS packet and returns low-level write timing.
+    ///
+    /// `packet` must already include the 8-byte TDS header followed by the
+    /// packet payload. Writing the contiguous buffer keeps direct bulk writes
+    /// equivalent to the framed packet path and avoids a separate tiny header
+    /// write for every bulk packet.
+    pub(crate) async fn write_direct_packet_buffer_with_timing(
         &mut self,
-        header: PacketHeader,
-        payload: &[u8],
+        packet: &[u8],
     ) -> crate::Result<DirectPacketWriteTiming> {
         self.flushed = false;
 
-        let mut header_bytes = BytesMut::with_capacity(HEADER_BYTES);
-        header.encode_for_payload(payload.len(), &mut header_bytes)?;
+        if packet.len() < HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "direct TDS packet buffer is shorter than the packet header",
+            )
+            .into());
+        }
 
         let mut timing = DirectPacketWriteTiming {
-            header_bytes: header_bytes.len(),
-            payload_bytes: payload.len(),
+            header_bytes: HEADER_BYTES,
+            payload_bytes: packet.len() - HEADER_BYTES,
             raw_stream: matches!(&*self.transport, MaybeTlsStream::Raw(_)),
             #[cfg(any(
                 feature = "rustls",
@@ -347,23 +357,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             ..DirectPacketWriteTiming::default()
         };
 
-        // This benchmark-only path bypasses the framed packet sink and writes
-        // a complete TDS packet directly to the underlying stream. Callers must
-        // use it only when no framed packet bytes are buffered.
-        Self::write_all_direct_packet_bytes(
-            &mut self.transport,
-            &header_bytes,
-            DirectPacketWritePart::Header,
-            &mut timing,
-        )
-        .await?;
-        Self::write_all_direct_packet_bytes(
-            &mut self.transport,
-            payload,
-            DirectPacketWritePart::Payload,
-            &mut timing,
-        )
-        .await?;
+        Self::write_all_direct_packet_contiguous(&mut self.transport, packet, &mut timing).await?;
 
         let flush_start = std::time::Instant::now();
         Self::poll_direct_packet_flush(&mut self.transport, &mut timing).await?;
@@ -372,6 +366,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         Ok(timing)
     }
 
+    #[cfg(test)]
     async fn write_all_direct_packet_bytes(
         stream: &mut MaybeTlsStream<S>,
         mut bytes: &[u8],
@@ -401,6 +396,97 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             timing.max_write_elapsed = timing.max_write_elapsed.max(elapsed);
             Self::record_direct_packet_write_part(timing, part, remaining, written, elapsed);
             bytes = &bytes[written..];
+        }
+
+        Ok(())
+    }
+
+    async fn write_all_direct_packet_contiguous(
+        stream: &mut MaybeTlsStream<S>,
+        packet: &[u8],
+        timing: &mut DirectPacketWriteTiming,
+    ) -> crate::Result<()> {
+        let payload_len = packet.len().saturating_sub(HEADER_BYTES);
+        let mut written_total = 0;
+        while written_total < packet.len() {
+            let write_start_offset = written_total;
+            let write_start = std::time::Instant::now();
+            let written =
+                Self::poll_direct_packet_write(stream, &packet[write_start_offset..], timing)
+                    .await?;
+            let elapsed = write_start.elapsed();
+
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to write direct TDS packet bytes",
+                )
+                .into());
+            }
+
+            timing.write_calls = timing.write_calls.saturating_add(1);
+            timing.write_bytes = timing
+                .write_bytes
+                .saturating_add(u64::try_from(written).unwrap_or(u64::MAX));
+            timing.max_write_bytes = timing.max_write_bytes.max(written);
+            timing.write_elapsed += elapsed;
+            timing.max_write_elapsed = timing.max_write_elapsed.max(elapsed);
+
+            let write_end_offset = write_start_offset.saturating_add(written);
+            if write_end_offset > packet.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "direct TDS packet contiguous write reported too many bytes",
+                )
+                .into());
+            }
+
+            let header_written = write_end_offset
+                .min(HEADER_BYTES)
+                .saturating_sub(write_start_offset.min(HEADER_BYTES));
+            let payload_start_offset = HEADER_BYTES;
+            let payload_end_offset = HEADER_BYTES.saturating_add(payload_len);
+            let payload_written = write_end_offset.min(payload_end_offset).saturating_sub(
+                write_start_offset
+                    .max(payload_start_offset)
+                    .min(payload_end_offset),
+            );
+            // A single raw write can cover both header and payload bytes. Keep
+            // the public timing split by attributing the elapsed time to the
+            // payload side in that case, so header plus payload elapsed does
+            // not double-count the same write.
+            if header_written > 0 {
+                let header_remaining =
+                    HEADER_BYTES.saturating_sub(write_start_offset.min(HEADER_BYTES));
+                let header_elapsed = if payload_written > 0 {
+                    std::time::Duration::ZERO
+                } else {
+                    elapsed
+                };
+                Self::record_direct_packet_write_part(
+                    timing,
+                    DirectPacketWritePart::Header,
+                    header_remaining,
+                    header_written,
+                    header_elapsed,
+                );
+            }
+            if payload_written > 0 {
+                let payload_remaining = payload_len.saturating_sub(
+                    write_start_offset
+                        .saturating_sub(payload_start_offset)
+                        .min(payload_len),
+                );
+                Self::record_direct_packet_write_part(
+                    timing,
+                    DirectPacketWritePart::Payload,
+                    payload_remaining,
+                    payload_written,
+                    elapsed,
+                );
+            }
+
+            written_total = write_end_offset;
         }
 
         Ok(())
@@ -877,10 +963,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
 #[cfg(test)]
 mod tests {
     use super::{Connection, DirectPacketWritePart, DirectPacketWriteTiming, MaybeTlsStream};
-    use crate::tds::{
-        codec::{PacketCodec, PacketHeader},
-        Context, HEADER_BYTES,
-    };
+    use crate::tds::{codec::PacketCodec, Context, HEADER_BYTES};
     use asynchronous_codec::Framed;
     use bytes::BytesMut;
     use futures_util::io::{AsyncRead, AsyncWrite};
@@ -1014,10 +1097,9 @@ mod tests {
     async fn direct_packet_write_records_stream_mode_and_packet_parts() {
         let mut connection = Connection {
             transport: Framed::new(
-                MaybeTlsStream::Raw(ScriptedStream::with_writes([
-                    WriteAction::Write(HEADER_BYTES),
-                    WriteAction::Write(5),
-                ])),
+                MaybeTlsStream::Raw(ScriptedStream::with_writes([WriteAction::Write(
+                    HEADER_BYTES + 5,
+                )])),
                 PacketCodec,
             ),
             context: Context::new(),
@@ -1025,10 +1107,12 @@ mod tests {
             buf: BytesMut::new(),
         };
 
+        let mut packet = BytesMut::from(&[0_u8; HEADER_BYTES][..]);
+        packet.extend_from_slice(b"abcde");
         let timing = connection
-            .write_direct_packet_with_timing(PacketHeader::bulk_load(9), b"abcde")
+            .write_direct_packet_buffer_with_timing(&packet)
             .await
-            .expect("direct packet write should succeed");
+            .expect("direct packet buffer write should succeed");
 
         assert!(!connection.flushed);
         assert!(timing.raw_stream);
@@ -1042,9 +1126,41 @@ mod tests {
         );
         assert_eq!(timing.payload_write_calls, 1);
         assert_eq!(timing.payload_write_bytes, 5);
-        assert_eq!(timing.write_calls, 2);
+        assert_eq!(timing.write_calls, 1);
         assert_eq!(timing.write_bytes, u64::try_from(HEADER_BYTES + 5).unwrap());
         assert_eq!(timing.flush_pending_count, 0);
+    }
+
+    #[async_std::test]
+    async fn direct_packet_contiguous_write_handles_partial_header_and_payload_writes() {
+        let mut stream = MaybeTlsStream::Raw(ScriptedStream::with_writes([
+            WriteAction::Write(2),
+            WriteAction::Write(4),
+            WriteAction::Write(7),
+        ]));
+        let mut timing = DirectPacketWriteTiming::default();
+
+        Connection::<ScriptedStream>::write_all_direct_packet_contiguous(
+            &mut stream,
+            b"abcdefgh12345",
+            &mut timing,
+        )
+        .await
+        .expect("contiguous direct packet write should succeed");
+
+        let MaybeTlsStream::Raw(stream) = stream else {
+            unreachable!();
+        };
+        assert_eq!(stream.written, b"abcdefgh12345");
+        assert_eq!(timing.write_calls, 3);
+        assert_eq!(timing.write_bytes, 13);
+        assert_eq!(timing.max_write_bytes, 7);
+        assert_eq!(timing.header_write_calls, 3);
+        assert_eq!(timing.header_write_bytes, 8);
+        assert_eq!(timing.header_partial_writes, 2);
+        assert_eq!(timing.payload_write_calls, 1);
+        assert_eq!(timing.payload_write_bytes, 5);
+        assert_eq!(timing.payload_partial_writes, 0);
     }
 
     #[async_std::test]
