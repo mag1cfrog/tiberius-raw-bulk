@@ -249,6 +249,16 @@ where
         assert_eq!(0, stats.write_timing.direct_packet_write.tls_stream_calls);
     }
 
+    let stored_payloads: Vec<Vec<u8>> = conn
+        .query(format!("SELECT content FROM {table} ORDER BY id"), &[])
+        .await?
+        .try_filter_map(|item| async move { Ok(item.into_row()) })
+        .map_ok(|row| row.get::<&[u8], _>(0).unwrap().to_vec())
+        .try_collect()
+        .await?;
+
+    assert_eq!(payloads, stored_payloads);
+
     let row = conn
         .query(
             format!(
