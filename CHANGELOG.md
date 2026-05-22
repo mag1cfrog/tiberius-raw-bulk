@@ -1,5 +1,17 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.11
+
+- Coalesce each experimental direct bulk packet into one contiguous
+  header-plus-payload write buffer.
+- Keep the direct-mode pending buffer header-prefixed so packet headers can be
+  patched in place while bulk payload packet splitting stays inside
+  `BulkLoadRequest`.
+- Preserve direct packet profiling counters for header and payload byte
+  attribution across contiguous and partial low-level writes.
+- Add SQL Server bulk-load coverage for direct packet writes over raw and TLS
+  streams with payloads large enough to require packet splitting.
+
 ## Version 0.12.3-raw-bulk.10
 
 - Add deeper experimental direct packet write profiling:

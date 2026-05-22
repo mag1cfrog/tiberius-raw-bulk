@@ -10,7 +10,7 @@ library crate name as `tiberius` while publishing under a distinct Cargo package
 name:
 
 ```toml
-tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.10" }
+tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.11" }
 ```
 
 This fork exists to expose focused raw bulk-load extension points while keeping
