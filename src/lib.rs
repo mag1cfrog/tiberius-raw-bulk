@@ -276,12 +276,16 @@ pub use query::Query;
 pub use result::*;
 pub use row::{Column, ColumnType, Row};
 pub use sql_browser::SqlBrowser;
+#[cfg(feature = "bulk-load-profile")]
+pub use tds::codec::{
+    BulkLoadConnectionWriteStats, BulkLoadDirectPacketWriteStats, BulkLoadPacketStats,
+    BulkLoadStats, BulkLoadWriteTimingStats,
+};
 pub use tds::{
     codec::{
-        BulkLoadColumn, BulkLoadColumns, BulkLoadConnectionWriteStats,
-        BulkLoadDirectPacketWriteStats, BulkLoadPacketStats, BulkLoadRequest, BulkLoadStats,
-        BulkLoadWriteTimingStats, ColumnData, ColumnFlag, FixedLenType, IntoRow, RawRowsAppend,
-        RawRowsAppendBuffer, TokenRow, TypeInfo, TypeLength, VarLenContext, VarLenType,
+        BulkLoadColumn, BulkLoadColumns, BulkLoadRequest, ColumnData, ColumnFlag, FixedLenType,
+        IntoRow, RawRowsAppend, RawRowsAppendBuffer, TokenRow, TypeInfo, TypeLength, VarLenContext,
+        VarLenType,
     },
     numeric,
     stream::QueryStream,

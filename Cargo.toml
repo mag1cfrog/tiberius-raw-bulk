@@ -198,10 +198,12 @@ all = [
     "rust_decimal",
     "bigdecimal",
     "native-tls",
+    "bulk-load-profile",
 ]
 default = ["tds73", "winauth", "native-tls"]
 tds73 = []
 docs = []
+bulk-load-profile = []
 sql-browser-async-std = ["async-std"]
 sql-browser-tokio = ["tokio", "tokio-util"]
 sql-browser-smol = ["async-io", "async-net", "futures-lite"]
