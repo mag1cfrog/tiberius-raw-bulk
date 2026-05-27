@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## Version 0.12.3-raw-bulk.12
 
 - Add the `bulk-load-profile` feature for raw bulk-load profiling and
   statistics APIs.
