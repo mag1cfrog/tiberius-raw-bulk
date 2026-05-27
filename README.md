@@ -57,6 +57,7 @@ See [FORK.md](FORK.md) for upstream base and maintenance notes.
 | `time`                   | Read and write date and time values using `time` crate types.                                                                    | `disabled` |
 | `rust_decimal`           | Read and write `numeric`/`decimal` values using `rust_decimal`'s `Decimal`.                                                      | `disabled` |
 | `bigdecimal`             | Read and write `numeric`/`decimal` values using `bigdecimal`'s `BigDecimal`.                                                     | `disabled` |
+| `bulk-load-profile`      | Expose raw bulk-load profiling and statistics APIs, including packet counters and write timing breakdowns.                       | `disabled` |
 | `sql-browser-async-std`  | SQL Browser implementation for the `TcpStream` of async-std.                                                                     | `disabled` |
 | `sql-browser-tokio`      | SQL Browser implementation for the `TcpStream` of Tokio.                                                                         | `disabled` |
 | `sql-browser-smol`       | SQL Browser implementation for the `TcpStream` of smol.                                                                          | `disabled` |
