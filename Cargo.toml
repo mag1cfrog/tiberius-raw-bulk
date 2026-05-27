@@ -184,7 +184,18 @@ chrono = "0.4.38"
 indoc = "1.0.7"
 
 [package.metadata.docs.rs]
-features = ["all", "docs"]
+features = [
+    "docs",
+    "tds73",
+    "chrono",
+    "time",
+    "rust_decimal",
+    "bigdecimal",
+    "native-tls",
+    "bulk-load-profile",
+    "sql-browser-async-std",
+    "sql-browser-tokio",
+]
 
 [features]
 all = [
