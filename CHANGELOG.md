@@ -1,5 +1,15 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.12
+
+- Add the `bulk-load-profile` feature for raw bulk-load profiling and
+  statistics APIs.
+- Remove bulk-load packet stats, write timing stats, combined stats, and
+  stats-returning finalization methods from the default build. Consumers that
+  need those APIs must enable `bulk-load-profile`.
+- Keep normal bulk writes and direct packet writes available without
+  profiling enabled.
+
 ## Version 0.12.3-raw-bulk.11
 
 - Coalesce each experimental direct bulk packet into one contiguous

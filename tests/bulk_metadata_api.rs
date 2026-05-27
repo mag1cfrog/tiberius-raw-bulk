@@ -6,9 +6,13 @@ use std::{
 
 use futures_util::io::{AsyncRead, AsyncWrite};
 use tiberius::{
-    BulkLoadColumn, BulkLoadColumns, BulkLoadConnectionWriteStats, BulkLoadDirectPacketWriteStats,
-    BulkLoadPacketStats, BulkLoadRequest, BulkLoadStats, BulkLoadWriteTimingStats, Client,
-    ColumnFlag, ColumnType, ExecuteResult, FixedLenType, TypeInfo, VarLenType,
+    BulkLoadColumn, BulkLoadColumns, BulkLoadRequest, Client, ColumnFlag, ColumnType, FixedLenType,
+    TypeInfo, VarLenType,
+};
+#[cfg(feature = "bulk-load-profile")]
+use tiberius::{
+    BulkLoadConnectionWriteStats, BulkLoadDirectPacketWriteStats, BulkLoadPacketStats,
+    BulkLoadStats, BulkLoadWriteTimingStats, ExecuteResult,
 };
 
 struct ExternalStream;
@@ -55,9 +59,12 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
     fn inspect_request(req: &BulkLoadRequest<'_, ExternalStream>) {
         let columns = req.columns();
         let _column_count = columns.len();
-        let _stats: BulkLoadPacketStats = req.packet_stats();
-        let _timing: BulkLoadWriteTimingStats = req.write_timing_stats();
-        let _all_stats: BulkLoadStats = req.stats();
+        #[cfg(feature = "bulk-load-profile")]
+        {
+            let _stats: BulkLoadPacketStats = req.packet_stats();
+            let _timing: BulkLoadWriteTimingStats = req.write_timing_stats();
+            let _all_stats: BulkLoadStats = req.stats();
+        }
 
         for column in columns {
             inspect_column(column);
@@ -98,6 +105,7 @@ fn external_crate_can_name_and_inspect_bulk_metadata_api() {
 }
 
 #[test]
+#[cfg(feature = "bulk-load-profile")]
 fn external_crate_can_name_bulk_packet_stats_api() {
     let stats = BulkLoadPacketStats::default();
 
@@ -111,6 +119,7 @@ fn external_crate_can_name_bulk_packet_stats_api() {
 }
 
 #[test]
+#[cfg(feature = "bulk-load-profile")]
 fn external_crate_can_name_bulk_write_timing_stats_api() {
     let stats = BulkLoadWriteTimingStats::default();
 
@@ -132,6 +141,7 @@ fn external_crate_can_name_bulk_write_timing_stats_api() {
 }
 
 #[test]
+#[cfg(feature = "bulk-load-profile")]
 fn external_crate_can_name_bulk_connection_write_stats_api() {
     let stats = BulkLoadConnectionWriteStats::default();
 
@@ -147,6 +157,7 @@ fn external_crate_can_name_bulk_connection_write_stats_api() {
 }
 
 #[test]
+#[cfg(feature = "bulk-load-profile")]
 fn external_crate_can_name_bulk_direct_packet_write_stats_api() {
     let stats = BulkLoadDirectPacketWriteStats::default();
 
@@ -192,6 +203,7 @@ fn external_crate_can_name_bulk_direct_packet_write_stats_api() {
 }
 
 #[test]
+#[cfg(feature = "bulk-load-profile")]
 fn external_crate_can_name_combined_bulk_stats_api() {
     let stats = BulkLoadStats::default();
 
@@ -258,6 +270,7 @@ fn external_crate_can_enable_direct_packet_writes() {
 }
 
 #[test]
+#[cfg(feature = "bulk-load-profile")]
 fn external_crate_can_finalize_with_packet_stats() {
     async fn finish_with_stats(
         req: BulkLoadRequest<'_, ExternalStream>,
@@ -269,6 +282,7 @@ fn external_crate_can_finalize_with_packet_stats() {
 }
 
 #[test]
+#[cfg(feature = "bulk-load-profile")]
 fn external_crate_can_finalize_with_combined_bulk_stats() {
     async fn finish_with_stats(
         req: BulkLoadRequest<'_, ExternalStream>,

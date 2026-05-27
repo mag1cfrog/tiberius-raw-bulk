@@ -2,13 +2,15 @@ use asynchronous_codec::BytesMut;
 use bytes::BufMut;
 use enumflags2::BitFlags;
 use futures_util::io::{AsyncRead, AsyncWrite};
+#[cfg(feature = "bulk-load-profile")]
 use std::time::{Duration, Instant};
 use tracing::{event, Level};
 
+#[cfg(feature = "bulk-load-profile")]
+use crate::client::{DirectPacketPollWriteSummary, DirectPacketWriteTiming};
 use crate::{
-    client::{Connection, DirectPacketPollWriteSummary, DirectPacketWriteTiming},
-    sql_read_bytes::SqlReadBytes,
-    BytesMutWithDataColumns, ColumnFlag, ColumnType, ExecuteResult,
+    client::Connection, sql_read_bytes::SqlReadBytes, BytesMutWithDataColumns, ColumnFlag,
+    ColumnType, ExecuteResult,
 };
 
 use super::{
@@ -113,6 +115,7 @@ impl RawRowsAppendBuffer<'_> {
 /// These counters are intended for benchmarking and diagnostics. They do not
 /// change bulk-load behavior and do not include TDS packet header bytes unless
 /// a field name explicitly says otherwise.
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BulkLoadPacketStats {
     /// Number of times the request attempted to drain complete packets.
@@ -131,6 +134,7 @@ pub struct BulkLoadPacketStats {
     pub finalized_packet_payload_bytes: usize,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 impl BulkLoadPacketStats {
     fn record_write_packets_call(&mut self, buffered_bytes_before_write: usize) {
         self.write_packets_calls = self.write_packets_calls.saturating_add(1);
@@ -161,6 +165,7 @@ impl BulkLoadPacketStats {
 /// These counters are intended for benchmarking and diagnostics. They separate
 /// time spent in bulk-load packet draining from lower-level connection writes
 /// and flushes without changing bulk-load behavior.
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BulkLoadWriteTimingStats {
     /// Time spent inside bulk-load packet drain attempts.
@@ -196,6 +201,7 @@ pub struct BulkLoadWriteTimingStats {
     pub direct_packet_write: BulkLoadDirectPacketWriteStats,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 impl BulkLoadWriteTimingStats {
     fn record_write_packets_elapsed(&mut self, elapsed: Duration) {
         self.write_packets_elapsed += elapsed;
@@ -261,6 +267,7 @@ impl BulkLoadWriteTimingStats {
 /// [`BulkLoadWriteTimingStats::write_to_wire_elapsed`]. They are intended to
 /// show whether raw bulk writes are dominated by sink readiness, packet
 /// encoding, or sink flushing while preserving the existing write behavior.
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BulkLoadConnectionWriteStats {
     /// Number of bulk-load packets passed into the connection write path.
@@ -284,6 +291,7 @@ pub struct BulkLoadConnectionWriteStats {
     pub max_payload_bytes: usize,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 impl BulkLoadConnectionWriteStats {
     fn record(
         &mut self,
@@ -312,6 +320,7 @@ impl BulkLoadConnectionWriteStats {
 /// These counters are intended to compare an experimental bulk-only packet
 /// writer against the framed sink path. They remain zero when the framed path
 /// is used.
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BulkLoadDirectPacketWriteStats {
     /// Number of TDS packets passed to the direct packet writer.
@@ -394,6 +403,7 @@ pub struct BulkLoadDirectPacketWriteStats {
     pub flush_max_pending_elapsed: Duration,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 impl BulkLoadDirectPacketWriteStats {
     fn record_timing(&mut self, timing: DirectPacketWriteTiming, final_packet: bool) {
         self.record_packet(timing.payload_bytes, timing.header_bytes, final_packet);
@@ -544,6 +554,7 @@ impl BulkLoadDirectPacketWriteStats {
 }
 
 /// Complete benchmark statistics collected by a bulk-load request.
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BulkLoadStats {
     /// Packet counters collected while writing bulk-load data.
@@ -562,7 +573,9 @@ where
     packet_id: u8,
     buf: BytesMut,
     columns: Vec<MetaDataColumn<'a>>,
+    #[cfg(feature = "bulk-load-profile")]
     packet_stats: BulkLoadPacketStats,
+    #[cfg(feature = "bulk-load-profile")]
     write_timing_stats: BulkLoadWriteTimingStats,
     direct_packet_writes: bool,
 }
@@ -625,7 +638,9 @@ where
             packet_id,
             buf,
             columns,
+            #[cfg(feature = "bulk-load-profile")]
             packet_stats: BulkLoadPacketStats::default(),
+            #[cfg(feature = "bulk-load-profile")]
             write_timing_stats: BulkLoadWriteTimingStats::default(),
             direct_packet_writes: false,
         };
@@ -647,16 +662,19 @@ where
     }
 
     /// Returns packet-write statistics collected by this bulk-load request.
+    #[cfg(feature = "bulk-load-profile")]
     pub fn packet_stats(&self) -> BulkLoadPacketStats {
         self.packet_stats
     }
 
     /// Returns write timing statistics collected by this bulk-load request.
+    #[cfg(feature = "bulk-load-profile")]
     pub fn write_timing_stats(&self) -> BulkLoadWriteTimingStats {
         self.write_timing_stats
     }
 
     /// Returns all benchmark statistics collected by this bulk-load request.
+    #[cfg(feature = "bulk-load-profile")]
     pub fn stats(&self) -> BulkLoadStats {
         BulkLoadStats {
             packet: self.packet_stats,
@@ -823,9 +841,50 @@ where
     /// This method must be called after sending all the data to flush all
     /// pending data and to get the server actually to store the rows to the
     /// table.
+    #[cfg(feature = "bulk-load-profile")]
     pub async fn finalize(self) -> crate::Result<ExecuteResult> {
         let (result, _) = self.finalize_with_stats().await?;
         Ok(result)
+    }
+
+    /// Ends the bulk load, flushing all pending data to the wire.
+    ///
+    /// This method must be called after sending all the data to flush all
+    /// pending data and to get the server actually to store the rows to the
+    /// table.
+    #[cfg(not(feature = "bulk-load-profile"))]
+    pub async fn finalize(mut self) -> crate::Result<ExecuteResult> {
+        TokenDone::default().encode(&mut self.buf)?;
+        self.write_packets().await?;
+
+        let data = self.buf.split();
+        let data_len = if self.direct_packet_writes {
+            data.len().saturating_sub(HEADER_BYTES)
+        } else {
+            data.len()
+        };
+
+        event!(
+            Level::TRACE,
+            "Finalizing a bulk insert ({} bytes)",
+            data_len + HEADER_BYTES,
+        );
+
+        if self.direct_packet_writes {
+            let mut data = data;
+            let mut header = PacketHeader::bulk_load(self.packet_id);
+            header.set_status(PacketStatus::EndOfMessage);
+            let mut header_buf = &mut data[..HEADER_BYTES];
+            header.encode_for_payload(data_len, &mut header_buf)?;
+            self.connection.write_direct_packet_buffer(&data).await?;
+        } else {
+            let mut header = PacketHeader::bulk_load(self.packet_id);
+            header.set_status(PacketStatus::EndOfMessage);
+            self.connection.write_to_wire(header, data).await?;
+        }
+
+        self.connection.flush_sink().await?;
+        ExecuteResult::new(self.connection).await
     }
 
     /// Ends the bulk load and returns packet statistics collected by the request.
@@ -835,6 +894,7 @@ where
     /// finalization consumes the request.
     ///
     /// [`finalize`]: Self::finalize
+    #[cfg(feature = "bulk-load-profile")]
     pub async fn finalize_with_packet_stats(
         self,
     ) -> crate::Result<(ExecuteResult, BulkLoadPacketStats)> {
@@ -849,6 +909,7 @@ where
     /// the request.
     ///
     /// [`finalize`]: Self::finalize
+    #[cfg(feature = "bulk-load-profile")]
     pub async fn finalize_with_stats(mut self) -> crate::Result<(ExecuteResult, BulkLoadStats)> {
         let finalize_start = Instant::now();
         TokenDone::default().encode(&mut self.buf)?;
@@ -936,24 +997,38 @@ where
     }
 
     async fn write_packets(&mut self) -> crate::Result<()> {
-        let write_packets_start = Instant::now();
-        let result = if self.direct_packet_writes {
-            self.write_packets_direct_inner().await
-        } else {
-            self.write_packets_framed_inner().await
-        };
-        self.write_timing_stats
-            .record_write_packets_elapsed(write_packets_start.elapsed());
-        result
+        #[cfg(feature = "bulk-load-profile")]
+        {
+            let write_packets_start = Instant::now();
+            let result = if self.direct_packet_writes {
+                self.write_packets_direct_inner().await
+            } else {
+                self.write_packets_framed_inner().await
+            };
+            self.write_timing_stats
+                .record_write_packets_elapsed(write_packets_start.elapsed());
+            result
+        }
+
+        #[cfg(not(feature = "bulk-load-profile"))]
+        {
+            if self.direct_packet_writes {
+                self.write_packets_direct_inner().await
+            } else {
+                self.write_packets_framed_inner().await
+            }
+        }
     }
 
     async fn write_packets_framed_inner(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
+        #[cfg(feature = "bulk-load-profile")]
         self.packet_stats.record_write_packets_call(self.buf.len());
 
         while self.buf.len() > packet_size {
             let header = PacketHeader::bulk_load(self.packet_id);
             let data = self.buf.split_to(packet_size);
+            #[cfg(feature = "bulk-load-profile")]
             self.packet_stats.record_packet_written(data.len());
 
             event!(
@@ -962,27 +1037,33 @@ where
                 data.len() + HEADER_BYTES,
             );
 
-            let data_len = data.len();
-            let write_start = Instant::now();
-            let write_result = self
-                .connection
-                .write_to_wire_with_timing(header, data)
-                .await;
-            self.write_timing_stats
-                .record_write_to_wire(write_start.elapsed(), data_len);
-            match write_result {
-                Ok(connection_timing) => {
-                    self.write_timing_stats.record_connection_write(
-                        data_len,
-                        connection_timing.ready_elapsed,
-                        connection_timing.encode_elapsed,
-                        connection_timing.flush_elapsed,
-                    );
+            #[cfg(feature = "bulk-load-profile")]
+            {
+                let data_len = data.len();
+                let write_start = Instant::now();
+                let write_result = self
+                    .connection
+                    .write_to_wire_with_timing(header, data)
+                    .await;
+                self.write_timing_stats
+                    .record_write_to_wire(write_start.elapsed(), data_len);
+                match write_result {
+                    Ok(connection_timing) => {
+                        self.write_timing_stats.record_connection_write(
+                            data_len,
+                            connection_timing.ready_elapsed,
+                            connection_timing.encode_elapsed,
+                            connection_timing.flush_elapsed,
+                        );
+                    }
+                    Err(err) => return Err(err),
                 }
-                Err(err) => return Err(err),
             }
+            #[cfg(not(feature = "bulk-load-profile"))]
+            self.connection.write_to_wire(header, data).await?;
         }
 
+        #[cfg(feature = "bulk-load-profile")]
         self.packet_stats
             .record_buffered_bytes_after_write(self.buf.len());
 
@@ -991,6 +1072,7 @@ where
 
     async fn write_packets_direct_inner(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
+        #[cfg(feature = "bulk-load-profile")]
         self.packet_stats
             .record_write_packets_call(self.direct_payload_len());
 
@@ -1011,6 +1093,7 @@ where
                 packet_size,
                 PacketStatus::NormalMessage,
             )?;
+            #[cfg(feature = "bulk-load-profile")]
             self.packet_stats.record_packet_written(packet_size);
 
             event!(
@@ -1019,19 +1102,26 @@ where
                 packet_size + HEADER_BYTES,
             );
 
-            let write_start = Instant::now();
-            let write_result = self
-                .connection
-                .write_direct_packet_buffer_with_timing(&self.buf[header_start..packet_end])
-                .await;
-            self.write_timing_stats
-                .record_write_to_wire(write_start.elapsed(), packet_size);
-            match write_result {
-                Ok(direct_timing) => self
-                    .write_timing_stats
-                    .record_direct_packet_write(direct_timing),
-                Err(err) => return Err(err),
+            #[cfg(feature = "bulk-load-profile")]
+            {
+                let write_start = Instant::now();
+                let write_result = self
+                    .connection
+                    .write_direct_packet_buffer_with_timing(&self.buf[header_start..packet_end])
+                    .await;
+                self.write_timing_stats
+                    .record_write_to_wire(write_start.elapsed(), packet_size);
+                match write_result {
+                    Ok(direct_timing) => self
+                        .write_timing_stats
+                        .record_direct_packet_write(direct_timing),
+                    Err(err) => return Err(err),
+                }
             }
+            #[cfg(not(feature = "bulk-load-profile"))]
+            self.connection
+                .write_direct_packet_buffer(&self.buf[header_start..packet_end])
+                .await?;
 
             sent_packets = true;
             payload_start += packet_size;
@@ -1049,6 +1139,7 @@ where
             replace_with_direct_packet_buffer(&mut self.buf);
         }
 
+        #[cfg(feature = "bulk-load-profile")]
         self.packet_stats
             .record_buffered_bytes_after_write(self.direct_payload_len());
 
@@ -1147,6 +1238,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "bulk-load-profile")]
 fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -1325,6 +1417,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_packet_stats_default_to_zero() {
         let stats = BulkLoadPacketStats::default();
 
@@ -1338,6 +1431,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_packet_stats_record_write_attempts_and_buffer_tail() {
         let mut stats = BulkLoadPacketStats::default();
 
@@ -1353,6 +1447,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_packet_stats_accumulate_packet_bytes_and_maxima() {
         let mut stats = BulkLoadPacketStats::default();
 
@@ -1366,6 +1461,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_packet_stats_record_final_packet_separately() {
         let mut stats = BulkLoadPacketStats::default();
 
@@ -1377,6 +1473,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_write_timing_stats_default_to_zero() {
         let stats = BulkLoadWriteTimingStats::default();
 
@@ -1404,6 +1501,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_connection_write_stats_default_to_zero() {
         let stats = BulkLoadConnectionWriteStats::default();
 
@@ -1419,6 +1517,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_connection_write_stats_accumulate_and_track_maxima() {
         let mut stats = BulkLoadConnectionWriteStats::default();
 
@@ -1447,6 +1546,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_direct_packet_write_stats_default_to_zero() {
         let stats = BulkLoadDirectPacketWriteStats::default();
 
@@ -1492,6 +1592,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_direct_packet_write_stats_accumulate_and_track_maxima() {
         let mut stats = BulkLoadDirectPacketWriteStats::default();
 
@@ -1595,6 +1696,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_write_timing_stats_accumulate_write_packets_elapsed() {
         let mut stats = BulkLoadWriteTimingStats::default();
 
@@ -1605,6 +1707,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_write_timing_stats_accumulate_write_to_wire() {
         let mut stats = BulkLoadWriteTimingStats::default();
 
@@ -1619,6 +1722,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bulk-load-profile")]
     fn bulk_load_write_timing_stats_accumulate_flush_and_finalize() {
         let mut stats = BulkLoadWriteTimingStats::default();
 

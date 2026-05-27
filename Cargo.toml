@@ -13,7 +13,7 @@ license = "MIT/Apache-2.0"
 name = "tiberius-raw-bulk"
 readme = "README.md"
 repository = "https://github.com/mag1cfrog/tiberius-raw-bulk"
-version = "0.12.3-raw-bulk.11"
+version = "0.12.3-raw-bulk.12"
 
 [lib]
 name = "tiberius"
@@ -184,7 +184,18 @@ chrono = "0.4.38"
 indoc = "1.0.7"
 
 [package.metadata.docs.rs]
-features = ["all", "docs"]
+features = [
+    "docs",
+    "tds73",
+    "chrono",
+    "time",
+    "rust_decimal",
+    "bigdecimal",
+    "native-tls",
+    "bulk-load-profile",
+    "sql-browser-async-std",
+    "sql-browser-tokio",
+]
 
 [features]
 all = [
@@ -198,10 +209,12 @@ all = [
     "rust_decimal",
     "bigdecimal",
     "native-tls",
+    "bulk-load-profile",
 ]
 default = ["tds73", "winauth", "native-tls"]
 tds73 = []
 docs = []
+bulk-load-profile = []
 sql-browser-async-std = ["async-std"]
 sql-browser-tokio = ["tokio", "tokio-util"]
 sql-browser-smol = ["async-io", "async-net", "futures-lite"]

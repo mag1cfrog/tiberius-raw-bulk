@@ -23,7 +23,9 @@ use codec::TokenSspi;
 use futures_util::future::poll_fn;
 use futures_util::io::{AsyncRead, AsyncWrite};
 use futures_util::ready;
-use futures_util::sink::{Sink, SinkExt};
+#[cfg(feature = "bulk-load-profile")]
+use futures_util::sink::Sink;
+use futures_util::sink::SinkExt;
 use futures_util::stream::{Stream, TryStream, TryStreamExt};
 #[cfg(all(unix, feature = "integrated-auth-gssapi"))]
 use libgssapi::{
@@ -60,6 +62,7 @@ where
     buf: BytesMut,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ConnectionWriteTiming {
     pub(crate) ready_elapsed: std::time::Duration,
@@ -67,6 +70,7 @@ pub(crate) struct ConnectionWriteTiming {
     pub(crate) flush_elapsed: std::time::Duration,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DirectPacketWriteTiming {
     pub(crate) header_bytes: usize,
@@ -103,6 +107,7 @@ pub(crate) struct DirectPacketWriteTiming {
     pub(crate) flush_max_pending_elapsed: std::time::Duration,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct DirectPacketPollWriteSummary {
     pub(crate) polls: u64,
@@ -114,6 +119,7 @@ pub(crate) struct DirectPacketPollWriteSummary {
     pub(crate) max_ready_elapsed: std::time::Duration,
 }
 
+#[cfg(feature = "bulk-load-profile")]
 impl DirectPacketWriteTiming {
     pub(crate) fn poll_write_summary(self) -> DirectPacketPollWriteSummary {
         DirectPacketPollWriteSummary {
@@ -128,6 +134,7 @@ impl DirectPacketWriteTiming {
     }
 }
 
+#[cfg(feature = "bulk-load-profile")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectPacketWritePart {
     Header,
@@ -297,6 +304,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     /// This is used by bulk-load benchmarks only. It intentionally mirrors the
     /// `send` sequence of readiness, encoding, and flush so the measured path
     /// stays behavior-equivalent to [`write_to_wire`].
+    #[cfg(feature = "bulk-load-profile")]
     pub(crate) async fn write_to_wire_with_timing(
         &mut self,
         header: PacketHeader,
@@ -330,6 +338,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     /// packet payload. Writing the contiguous buffer keeps direct bulk writes
     /// equivalent to the framed packet path and avoids a separate tiny header
     /// write for every bulk packet.
+    #[cfg(feature = "bulk-load-profile")]
     pub(crate) async fn write_direct_packet_buffer_with_timing(
         &mut self,
         packet: &[u8],
@@ -366,7 +375,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         Ok(timing)
     }
 
-    #[cfg(test)]
+    /// Writes one complete direct TDS packet without collecting profiling data.
+    ///
+    /// `packet` must already include the 8-byte TDS header followed by the
+    /// packet payload.
+    #[cfg(not(feature = "bulk-load-profile"))]
+    pub(crate) async fn write_direct_packet_buffer(&mut self, packet: &[u8]) -> crate::Result<()> {
+        self.flushed = false;
+
+        if packet.len() < HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "direct TDS packet buffer is shorter than the packet header",
+            )
+            .into());
+        }
+
+        Self::write_all_direct_packet_contiguous_plain(&mut self.transport, packet).await?;
+        poll_fn(|cx| Pin::new(&mut *self.transport).poll_flush(cx)).await?;
+
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "bulk-load-profile"))]
     async fn write_all_direct_packet_bytes(
         stream: &mut MaybeTlsStream<S>,
         mut bytes: &[u8],
@@ -401,6 +432,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         Ok(())
     }
 
+    #[cfg(not(feature = "bulk-load-profile"))]
+    async fn write_all_direct_packet_contiguous_plain(
+        stream: &mut MaybeTlsStream<S>,
+        packet: &[u8],
+    ) -> crate::Result<()> {
+        let mut written_total = 0;
+        while written_total < packet.len() {
+            let written =
+                poll_fn(|cx| Pin::new(&mut *stream).poll_write(cx, &packet[written_total..]))
+                    .await?;
+
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to write direct TDS packet bytes",
+                )
+                .into());
+            }
+
+            written_total = written_total.saturating_add(written);
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "bulk-load-profile")]
     async fn write_all_direct_packet_contiguous(
         stream: &mut MaybeTlsStream<S>,
         packet: &[u8],
@@ -492,6 +549,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         Ok(())
     }
 
+    #[cfg(feature = "bulk-load-profile")]
     async fn poll_direct_packet_write(
         stream: &mut MaybeTlsStream<S>,
         bytes: &[u8],
@@ -532,6 +590,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         .await
     }
 
+    #[cfg(feature = "bulk-load-profile")]
     async fn poll_direct_packet_flush(
         stream: &mut MaybeTlsStream<S>,
         timing: &mut DirectPacketWriteTiming,
@@ -560,6 +619,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         .await
     }
 
+    #[cfg(feature = "bulk-load-profile")]
     fn record_direct_packet_write_part(
         timing: &mut DirectPacketWriteTiming,
         part: DirectPacketWritePart,
@@ -960,7 +1020,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bulk-load-profile"))]
 mod tests {
     use super::{Connection, DirectPacketWritePart, DirectPacketWriteTiming, MaybeTlsStream};
     use crate::tds::{codec::PacketCodec, Context, HEADER_BYTES};

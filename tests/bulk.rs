@@ -193,7 +193,7 @@ where
 
 async fn direct_packet_bulk_insert_sends_split_packets<S>(
     mut conn: tiberius::Client<S>,
-    expect_tls: bool,
+    _expect_tls: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -224,29 +224,35 @@ where
         req.send(row).await?;
     }
 
+    #[cfg(feature = "bulk-load-profile")]
     let (res, stats) = req.finalize_with_stats().await?;
+    #[cfg(not(feature = "bulk-load-profile"))]
+    let res = req.finalize().await?;
 
     assert_eq!(ROWS as u64, res.total());
-    assert!(
-        stats.packet.packets_written > 0,
-        "test payload should force split TDS packets",
-    );
-    assert!(
-        stats.write_timing.direct_packet_write.calls > 1,
-        "direct packet writer should see multiple packets",
-    );
-    if expect_tls {
-        assert_eq!(0, stats.write_timing.direct_packet_write.raw_stream_calls);
+    #[cfg(feature = "bulk-load-profile")]
+    {
         assert!(
-            stats.write_timing.direct_packet_write.tls_stream_calls > 1,
-            "encrypted direct packet writes should use the TLS stream path",
+            stats.packet.packets_written > 0,
+            "test payload should force split TDS packets",
         );
-    } else {
         assert!(
-            stats.write_timing.direct_packet_write.raw_stream_calls > 1,
-            "plaintext direct packet writes should use the raw stream path",
+            stats.write_timing.direct_packet_write.calls > 1,
+            "direct packet writer should see multiple packets",
         );
-        assert_eq!(0, stats.write_timing.direct_packet_write.tls_stream_calls);
+        if _expect_tls {
+            assert_eq!(0, stats.write_timing.direct_packet_write.raw_stream_calls);
+            assert!(
+                stats.write_timing.direct_packet_write.tls_stream_calls > 1,
+                "encrypted direct packet writes should use the TLS stream path",
+            );
+        } else {
+            assert!(
+                stats.write_timing.direct_packet_write.raw_stream_calls > 1,
+                "plaintext direct packet writes should use the raw stream path",
+            );
+            assert_eq!(0, stats.write_timing.direct_packet_write.tls_stream_calls);
+        }
     }
 
     let stored_payloads: Vec<Vec<u8>> = conn
