@@ -184,7 +184,7 @@ jobs:
         run: cargo test ${{matrix.features}}
 
   cargo-test-macos:
-    runs-on: macos-12
+    runs-on: macos-15-intel
 
     strategy:
       fail-fast: false
