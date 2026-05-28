@@ -128,8 +128,11 @@ jobs:
         if: steps.cacher.outputs.cache-hit != 'true'
         shell: powershell
         run: |
-            Set-PSRepository PSGallery -InstallationPolicy Trusted
-            Install-Module SqlServer
+            if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+              Register-PSRepository -Default
+            }
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module SqlServer -Scope CurrentUser -Force
 
       - name: Install SQL Server ${{matrix.database}}
         shell: powershell
@@ -204,6 +207,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: docker/setup-docker-action@v5
+
+      - uses: docker/setup-compose-action@v1
 
       - name: Start SQL Server ${{matrix.database}}
         run: DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}
