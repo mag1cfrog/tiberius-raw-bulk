@@ -132,7 +132,9 @@ jobs:
               Register-PSRepository -Default
             }
             Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-            Install-Module SqlServer -Scope CurrentUser -Force
+            if (-not (Get-Module -ListAvailable -Name SqlServer)) {
+              Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber
+            }
 
       - name: Install SQL Server ${{matrix.database}}
         shell: powershell
