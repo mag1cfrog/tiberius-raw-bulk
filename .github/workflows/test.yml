@@ -65,7 +65,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ matrix.features }}
 
       - name: Start SQL Server ${{matrix.database}}
-        run: DOCKER_BUILDKIT=1 docker-compose -f docker-compose.yml up -d mssql-${{matrix.database}}
+        run: DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
@@ -206,7 +206,7 @@ jobs:
       - uses: docker/setup-docker-action@v5
 
       - name: Start SQL Server ${{matrix.database}}
-        run: DOCKER_BUILDKIT=1 docker-compose -f docker-compose.yml up -d mssql-${{matrix.database}}
+        run: DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}
 
       - name: Run tests
         run: cargo test ${{matrix.features}}
