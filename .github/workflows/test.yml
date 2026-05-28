@@ -8,30 +8,25 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
-            components: clippy
-            override: true
+          components: clippy
       - name: Install dependencies
-        run: sudo apt install -y openssl libkrb5-dev
-      - uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --features=all
+        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+      - name: Run clippy
+        run: cargo clippy --features=all -- -D warnings
 
   format:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-          override: true
-      - uses: mbrobbel/rustfmt-check@master
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
   cargo-test-linux:
     runs-on: ubuntu-latest
@@ -57,11 +52,11 @@ jobs:
       RUSTFLAGS: "-Dwarnings"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v2
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -73,7 +68,7 @@ jobs:
         run: DOCKER_BUILDKIT=1 docker-compose -f docker-compose.yml up -d mssql-${{matrix.database}}
 
       - name: Install dependencies
-        run: sudo apt install -y openssl libkrb5-dev
+        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
 
       - name: Run tests
         run: cargo test ${{matrix.features}}
@@ -96,9 +91,9 @@ jobs:
       TIBERIUS_TEST_CONNECTION_STRING: "server=tcp:127.0.0.1,1433;IntegratedSecurity=true;TrustServerCertificate=true"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Set required PowerShell modules
         id: psmodulecache
@@ -108,20 +103,20 @@ jobs:
 
       - name: Setup PowerShell module cache
         id: cacher
-        uses: actions/cache@v2
+        uses: actions/cache@v5
         with:
             path: ${{ steps.psmodulecache.outputs.modulepath }}
             key: ${{ steps.psmodulecache.outputs.keygen }}
 
       - name: Setup Chocolatey download cache
         id: chococache
-        uses: actions/cache@v2
+        uses: actions/cache@v5
         with:
           path: C:\Users\runneradmin\AppData\Local\Temp\chocolatey\
           key: chocolatey-install
 
       - name: Setup Cargo build cache
-        uses: actions/cache@v2
+        uses: actions/cache@v5
         with:
           path: |
             C:\Users\runneradmin\.cargo\registry
@@ -204,11 +199,11 @@ jobs:
       TIBERIUS_TEST_CONNECTION_STRING: "server=tcp:localhost,1433;user=SA;password=<YourStrong@Passw0rd>;TrustServerCertificate=true"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: docker-practice/actions-setup-docker@master
+      - uses: docker/setup-docker-action@v5
 
       - name: Start SQL Server ${{matrix.database}}
         run: DOCKER_BUILDKIT=1 docker-compose -f docker-compose.yml up -d mssql-${{matrix.database}}
