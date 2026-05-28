@@ -17,7 +17,7 @@ review handoff, and later phase work in `arrow-tiberius`.
 3. Feature minimization and default feature health: complete for the initial baseline.
 4. API surface and dependency necessity: complete for the initial baseline.
 5. Supply-chain policy: complete for the initial baseline.
-6. Build and graph impact: pending.
+6. Build and graph impact: complete for the initial baseline.
 
 ## Step 1: Dependency Inventory
 
@@ -922,3 +922,163 @@ after the easy stale dev paths have been removed.
    behavior-changing branches.
 4. Revisit whether `multiple-versions` can move from `warn` to `deny` after
    the easiest duplicate roots are gone.
+
+## Step 6: Build and Graph Impact
+
+### Scope
+
+This audit branch did not change `Cargo.toml`, `Cargo.lock`, or
+`runtimes-macro/Cargo.toml`. It only added `deny.toml` and this audit document,
+so the dependency graph impact of the branch itself is zero.
+
+Step 6 records the current baseline and the likely impact areas for follow-up
+cleanup branches.
+
+### Commands Used
+
+```sh
+cargo tree -p tiberius-raw-bulk --target all --edges normal --prefix none <feature args>
+cargo tree -p tiberius-raw-bulk --target all --edges normal --duplicates <feature args>
+cargo tree --workspace --target all --edges normal,build,dev --prefix none
+cargo tree --workspace --target all --edges normal,build,dev --duplicates
+git diff --name-only main...HEAD
+git diff --stat main...HEAD -- Cargo.toml Cargo.lock runtimes-macro/Cargo.toml
+```
+
+Counts below are unique package/version entries from `cargo tree` after
+deduplicating repeated tree lines. They include the root package.
+
+### Runtime Graph Counts
+
+| Feature selection | Count | Duplicate groups | Impact note |
+| --- | ---: | ---: | --- |
+| No default features | 33 | 0 | Compact core protocol/runtime baseline. |
+| Default features | 104 | 3 | Adds `tds73`, Windows auth for Windows targets, and native TLS. |
+| `native-tls` only | 89 | 1 | Largest default contributor; duplicate group is `wit-bindgen` through target support crates. |
+| `winauth` only | 49 | 0 | Adds Windows auth path and old `rand 0.7`, but no duplicate group by itself. |
+| `rustls` only | 66 | 1 | Optional TLS backend; duplicate group is `windows-sys`. Still blocked by RustSec findings from step 2. |
+| `opentls` only | 70 | 0 | Optional OpenTLS backend; compiles in step 3, but not a default path. |
+| `sql-browser-tokio` only | 41 | 0 | Smallest SQL Browser runtime option. |
+| `sql-browser-smol` only | 76 | 4 | Pulls old smol-stack roots and duplicate `event-listener`, `fastrand`, `futures-lite`, and `windows-sys`. |
+| `sql-browser-async-std` only | 75 | 3 | Pulls discontinued `async-std` and duplicate `async-channel`, `event-listener`, and `syn`. |
+| `integrated-auth-gssapi` only | 37 | 0 | Small graph, but local compile needs GSSAPI headers. |
+| Feature `all` plus defaults | 182 | 17 | This is the crate's compatibility feature group plus defaults. |
+| Cargo `--all-features` | 206 | 28 | Broader than feature `all`; also includes feature combinations not selected by the crate's `all` feature. |
+| docs.rs feature set | 142 | 4 | Docs build feature set from package metadata. |
+
+Default duplicate groups:
+
+```text
+bitflags, getrandom, wit-bindgen
+```
+
+Feature `all` plus defaults duplicate groups:
+
+```text
+async-channel, async-io, async-lock, bitflags, event-listener, fastrand,
+futures-lite, getrandom, hermit-abi, linux-raw-sys, polling, rustix, socket2,
+syn, wasi, windows-sys, wit-bindgen
+```
+
+Cargo `--all-features` duplicate groups:
+
+```text
+async-channel, async-io, async-lock, bitflags, core-foundation, event-listener,
+fastrand, futures-lite, getrandom, hermit-abi, linux-raw-sys, openssl-probe,
+polling, rustix, security-framework, socket2, syn, wasi, windows-sys,
+windows-targets, windows_aarch64_gnullvm, windows_aarch64_msvc,
+windows_i686_gnu, windows_i686_msvc, windows_x86_64_gnu,
+windows_x86_64_gnullvm, windows_x86_64_msvc, wit-bindgen
+```
+
+### Workspace and Dev Graph Counts
+
+| Graph | Count | Duplicate groups | Impact note |
+| --- | ---: | ---: | --- |
+| Workspace default with normal, build, and dev edges | 305 | 28 | Dev/test dependencies nearly triple the default runtime graph. |
+| Workspace `--all-features` with normal, build, and dev edges | 337 | 40 | Maximum local audit surface; useful for CI diagnostics but too broad to represent normal users. |
+
+Workspace default duplicate groups:
+
+```text
+async-channel, async-lock, base64, bitflags, core-foundation, event-listener,
+fastrand, futures-lite, getrandom, hashbrown, hermit-abi, indexmap, rand,
+rand_chacha, rand_core, socket2, syn, wasi, windows-sys, windows-targets,
+windows_aarch64_gnullvm, windows_aarch64_msvc, windows_i686_gnu,
+windows_i686_msvc, windows_x86_64_gnu, windows_x86_64_gnullvm,
+windows_x86_64_msvc, wit-bindgen
+```
+
+### Impact Interpretation
+
+- The no-default runtime graph is already small. There is little value in
+  trimming core protocol dependencies before addressing stale feature and dev
+  paths.
+- The default graph cost is mostly native TLS and Windows auth. Keeping those
+  defaults is still the right compatibility decision, but Windows auth should
+  move away from `winauth`.
+- The crate's `all` feature is smaller than Cargo `--all-features` because it
+  does not enable every possible TLS/backend feature combination.
+- SQL Browser runtime choice matters. `sql-browser-tokio` has the smallest and
+  healthiest graph, while `sql-browser-smol` and `sql-browser-async-std` bring
+  more duplicate-version and maintenance risk.
+- Dev/test dependencies dominate the total workspace graph. Most immediate
+  graph reduction should come from dev cleanup, not from runtime API churn.
+- The docs.rs feature set is smaller than `--features all` but still pulls both
+  native TLS and async-std SQL Browser support. If docs do not need async-std
+  SQL Browser examples, the docs.rs feature set can be narrowed later.
+
+### Follow-up Cleanup Priority
+
+Recommended order for focused follow-up branches:
+
+1. Replace `names` in tests and upgrade `env_logger`. This should reduce
+   dev-only `atty`, `proc-macro-error`, `clap 3`, and related duplicate paths.
+2. Update or isolate the AAD example stack: `azure_identity`, `oauth2`, and
+   `reqwest`. This is the largest dev-only stale cluster and contributes old
+   `rand`, `rustls`, and `paste` paths.
+3. Replace or update `indicatif` and `indoc`. Both are narrow-use dev/example
+   dependencies.
+4. Update `runtimes-macro` from `syn 1`/old `darling` to current roots if the
+   macro still needs to exist after test cleanup.
+5. Migrate optional `rustls` as a security branch.
+6. Replace default Windows auth behind the existing public capability. Spike a
+   native SSPI adapter using the maintained `windows` crate first.
+7. Try smol SQL Browser root bumps separately.
+8. Decide whether to deprecate or narrow async-std support after compatibility
+   expectations are clear.
+
+### Downstream Guidance for `arrow-tiberius`
+
+For the next `arrow-tiberius` phase:
+
+- Keep using this fork's default TLS and Windows auth capabilities unless
+  downstream has a concrete reason to opt out.
+- Do not enable Cargo `--all-features` as a proxy for normal downstream usage.
+  It combines feature paths that ordinary users should not need together.
+- Prefer a minimal downstream feature set and document it explicitly. If
+  `arrow-tiberius` does not need SQL Browser runtime selection, rustls, OpenTLS,
+  or optional type-conversion features, leave them disabled.
+- Treat `cargo deny check advisories bans sources` as the policy gate, and keep
+  `cargo audit` as an investigation tool until the fork's known advisory debt is
+  reduced.
+- Re-run the `arrow-tiberius` audit after this fork has cleanup PRs for dev
+  dependencies, rustls, and Windows auth. Those fork changes will likely have
+  more downstream impact than any direct dependency trimming in `arrow-tiberius`.
+
+### Step 6 Findings
+
+- This PR has no dependency graph impact because it does not edit Cargo
+  manifests or the lockfile.
+- The baseline graph measurements are now recorded for later comparison.
+- Default runtime graph: 104 package/version entries and 3 duplicate groups.
+- Workspace default dev/build graph: 305 package/version entries and 28
+  duplicate groups.
+- The highest-impact cleanup work is dev/test dependency reduction, optional
+  rustls migration, and Windows auth replacement.
+
+### Completion Note
+
+The initial 1-6 audit pass for `tiberius-raw-bulk` is complete. The next work
+should be either focused cleanup issues/PRs in this fork or the downstream
+`arrow-tiberius` audit using the findings above.
