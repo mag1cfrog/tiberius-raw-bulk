@@ -16,7 +16,7 @@ review handoff, and later phase work in `arrow-tiberius`.
 2. Maintenance risk: complete for the initial baseline.
 3. Feature minimization and default feature health: complete for the initial baseline.
 4. API surface and dependency necessity: complete for the initial baseline.
-5. Supply-chain policy: pending.
+5. Supply-chain policy: complete for the initial baseline.
 6. Build and graph impact: pending.
 
 ## Step 1: Dependency Inventory
@@ -783,3 +783,142 @@ protocol behavior.
    `indicatif`, `paste`, and the AAD example stack.
 3. Keep runtime dependency replacements separate from policy setup so advisory
    enforcement does not get mixed with behavior changes.
+
+## Step 5: Supply-Chain Policy
+
+### Files Added
+
+This step adds a repository-level `deny.toml` policy file.
+
+The policy is intentionally a baseline policy, not a cleanup branch. It makes
+new advisory, source, and dependency-shape drift visible while documenting the
+known exceptions found in steps 1 through 4.
+
+### Commands Used
+
+```sh
+cargo deny --version
+cargo deny init /tmp/tiberius-deny-template.toml
+cargo deny check advisories bans sources
+cargo audit
+cargo metadata --format-version 1 > /tmp/tiberius-deny-default-metadata.json
+cargo metadata --format-version 1 --all-features > /tmp/tiberius-deny-all-features-metadata.json
+cargo metadata --format-version 1 --no-default-features > /tmp/tiberius-deny-no-default-metadata.json
+cargo deny check --metadata-path /tmp/tiberius-deny-default-metadata.json advisories bans sources
+cargo deny check --metadata-path /tmp/tiberius-deny-all-features-metadata.json advisories bans sources
+cargo deny check --metadata-path /tmp/tiberius-deny-no-default-metadata.json advisories bans sources
+```
+
+`cargo-deny 0.19.7` was used for this step.
+
+### Policy Decisions
+
+Advisories:
+
+- New advisories fail by default.
+- Existing known advisories are temporarily ignored with an inline reason.
+- The ignore reasons point to remediation work rather than treating the
+  advisories as acceptable long term.
+
+The current advisory ignores cover:
+
+| Advisory | Reason summary |
+| --- | --- |
+| `RUSTSEC-2025-0052` | `async-std` support is temporarily kept for compatibility. |
+| `RUSTSEC-2024-0375` | `atty` is currently dev-only through `names` and `env_logger`. |
+| `RUSTSEC-2024-0384` | `instant` is currently dev-only in the default deny graph through the old Azure example stack. |
+| `RUSTSEC-2025-0119` | `number_prefix` is dev-only through `indicatif` in `examples/bulk.rs`. |
+| `RUSTSEC-2024-0436` | `paste` is used directly in tests and transitively through the old Azure example stack. |
+| `RUSTSEC-2024-0370` | `proc-macro-error` is dev-only through `names -> clap 3`. |
+| `RUSTSEC-2025-0134` | `rustls-pemfile` is in the optional rustls stack and old dev `reqwest` path. |
+| `RUSTSEC-2026-0098` | `rustls-webpki` is in the optional rustls stack and old dev `reqwest` path. |
+| `RUSTSEC-2026-0099` | Same `rustls-webpki` path as above. |
+| `RUSTSEC-2026-0104` | Same `rustls-webpki` path as above. |
+
+`cargo audit` also reports `RUSTSEC-2021-0145` for `atty` and
+`RUSTSEC-2026-0097` for `rand 0.7`. Those advisories were not accepted by
+`cargo-deny` in this baseline because `cargo-deny` reported them as
+`advisory-not-detected` for the checked graph. They remain tracked in the audit
+findings from step 2.
+
+Bans:
+
+- Duplicate versions warn for now. The baseline has known duplicate versions,
+  and all-features intentionally pulls a much larger compatibility matrix.
+- Wildcard dependencies warn for now because `cargo-deny` reports the local
+  path dev dependency `runtimes-macro` as a wildcard dependency.
+- There is no crate allow/deny list yet. The current high-value action is to
+  establish the check and then tighten it after focused cleanup branches.
+
+Sources:
+
+- Unknown registries are denied.
+- Unknown git dependencies are denied.
+- The only allowed registry is crates.io.
+- No git sources are allowed by default.
+
+Licenses:
+
+- License policy is intentionally deferred from step 5. This branch focuses on
+  advisories, duplicate/wildcard dependency shape, and package sources.
+
+### Check Results
+
+`cargo deny check advisories bans sources` passes on the default graph with
+warnings:
+
+- Duplicate versions: `bitflags`, `getrandom`, `syn`, `wit-bindgen`.
+- Wildcard dependency: local path dev dependency `runtimes-macro`.
+
+The metadata-based feature matrix also passes:
+
+| Graph | Result | Warning summary |
+| --- | --- | --- |
+| Default metadata | Pass | Same baseline warnings as the default check. |
+| No-default metadata | Pass | Smaller warning set: `syn`, `wit-bindgen`, and the `runtimes-macro` wildcard warning. |
+| All-features metadata | Pass | Much larger duplicate-version warning set because all TLS, runtime, SQL Browser, GSSAPI, and dev paths are enabled together. |
+
+`cargo audit` still fails as a diagnostic command. That is expected at this
+stage because it scans the lockfile and reports the unresolved advisory set
+from step 2, including the optional rustls vulnerabilities and additional
+warnings that are not governed by `deny.toml`. For CI policy, use
+`cargo-deny`; keep `cargo audit` as an investigation tool until the follow-up
+cleanup branches remove or explicitly ignore the remaining findings there too.
+
+### CI Recommendation
+
+Add a CI job that installs `cargo-deny` and runs:
+
+```sh
+cargo deny check advisories bans sources
+```
+
+This can be added to the existing security workflow or as a separate dependency
+policy workflow. A separate workflow is easier to reason about because
+`cargo-deny` is a dependency policy gate, while the current security workflow
+is focused on secret and code scanning.
+
+Do not make `multiple-versions = "deny"` yet. Step 6 should measure the graph
+impact of cleanup candidates first, then tighten duplicate-version policy only
+after the easy stale dev paths have been removed.
+
+### Step 5 Findings
+
+- `deny.toml` now gives the fork a version-controlled supply-chain policy.
+- The current baseline can pass `cargo-deny` without hiding the known debt; the
+  accepted advisories are explicit and commented.
+- Unknown registries and unknown git sources are denied immediately.
+- Duplicate versions and wildcard dependencies are warning-level until cleanup
+  branches reduce the baseline.
+- `cargo audit` remains useful, but it is not the enforced policy gate in this
+  step.
+
+### Step 5 Follow-ups for Step 6
+
+1. Measure graph and duplicate-version impact after each focused cleanup.
+2. Prioritize dev cleanup that removes `names`, upgrades `env_logger`, and
+   updates or isolates the old Azure example stack.
+3. Keep the optional rustls migration and Windows auth replacement as separate
+   behavior-changing branches.
+4. Revisit whether `multiple-versions` can move from `warn` to `deny` after
+   the easiest duplicate roots are gone.
