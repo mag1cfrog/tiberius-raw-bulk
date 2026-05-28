@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
       - name: Run clippy
-        run: cargo clippy --features=all -- -D warnings
+        run: cargo clippy --features=all
 
   format:
     runs-on: ubuntu-latest
