@@ -13,7 +13,7 @@ review handoff, and later phase work in `arrow-tiberius`.
 ## Progress
 
 1. Dependency inventory: complete for the initial baseline.
-2. Maintenance risk: pending.
+2. Maintenance risk: complete for the initial baseline.
 3. Feature minimization and default feature health: pending.
 4. API surface and dependency necessity: pending.
 5. Supply-chain policy: pending.
@@ -275,3 +275,186 @@ outdated root dependencies, and duplicate versions as:
 - default Windows auth
 - optional non-default feature
 - dev/test only
+
+## Step 2: Maintenance Risk
+
+### Commands Used
+
+```sh
+cargo audit
+cargo audit --json
+cargo deny check advisories bans sources
+cargo outdated --workspace --root-deps-only
+cargo tree --workspace --target all --duplicates
+cargo tree --workspace --target all --invert <crate>
+cargo tree -p tiberius-raw-bulk --target all --no-default-features --features <feature> --invert <crate>
+cargo info <crate>@<version>
+```
+
+Crates.io metadata was also checked for notable root and transitive crates on
+2026-05-28.
+
+### Advisory Summary
+
+`cargo audit` scanned 375 lockfile dependencies against 1098 RustSec
+advisories. It reported:
+
+- 3 vulnerabilities
+- 9 advisory warnings
+
+Important classification: `cargo audit` scans the full lockfile. A finding can
+come from the default runtime graph, an optional feature graph, a target-specific
+graph, or dev/test dependencies.
+
+### Vulnerabilities
+
+| Advisory | Crate | Version | Classification | Path | Initial action |
+| --- | --- | --- | --- | --- | --- |
+| `RUSTSEC-2026-0098` | `rustls-webpki` | `0.101.7` | Optional `rustls` feature and dev-only `reqwest` path | `tokio-rustls 0.24.1 -> rustls 0.21.12 -> rustls-webpki`; also `reqwest 0.11.27` in dev deps | Upgrade the rustls stack or remove stale dev paths. |
+| `RUSTSEC-2026-0099` | `rustls-webpki` | `0.101.7` | Optional `rustls` feature and dev-only `reqwest` path | Same as above | Same as above. |
+| `RUSTSEC-2026-0104` | `rustls-webpki` | `0.101.7` | Optional `rustls` feature and dev-only `reqwest` path | Same as above | Same as above. |
+
+The default feature set uses `native-tls`, not `rustls`. These vulnerabilities
+are not on the default TLS backend path, but they are real for users enabling
+the optional `rustls` feature and for dev/test builds that pull `reqwest`.
+
+The current optional rustls dependency path is:
+
+```text
+rustls
+-> tokio-rustls 0.24.1
+   -> rustls 0.21.12
+      -> rustls-webpki 0.101.7
+-> rustls-native-certs 0.6.3
+   -> rustls-pemfile 1.0.4
+-> rustls-pemfile 1.0.4
+```
+
+`cargo outdated` reports newer roots:
+
+- `tokio-rustls 0.26.4`
+- `rustls-native-certs 0.8.3`
+- `rustls-pemfile 2.2.0`
+
+This is likely a larger compatibility migration, not only a lockfile update.
+`cargo info tokio-rustls@0.26.4` also shows that the old
+`dangerous_configuration` feature is obsolete in the newer line.
+
+### Advisory Warnings
+
+| Advisory | Crate | Version | Kind | Classification | Path | Initial action |
+| --- | --- | --- | --- | --- | --- | --- |
+| `RUSTSEC-2025-0052` | `async-std` | `1.13.2` | unmaintained | Optional `sql-browser-async-std` feature and dev/test direct dependency | Direct optional dependency and direct dev dependency | Decide whether to keep, deprecate, or document the async-std SQL Browser feature. |
+| `RUSTSEC-2024-0375` | `atty` | `0.2.14` | unmaintained | Dev/test only | `env_logger 0.9.3`, `names 0.14.0 -> clap 3.2.25` | Upgrade `env_logger`; consider replacing `names`. |
+| `RUSTSEC-2021-0145` | `atty` | `0.2.14` | unsound | Dev/test only, Windows-specific advisory | Same as above | Same as above. |
+| `RUSTSEC-2024-0384` | `instant` | `0.1.13` | unmaintained | Optional `sql-browser-smol` feature and dev-only Azure path | `async-io 1.13.0`, `async-net 1.8.0`, `futures-lite 1.13.0`; also `azure_identity` dev path | Test bumping smol stack roots to `async-io 2`, `async-net 2`, `futures-lite 2`. |
+| `RUSTSEC-2025-0119` | `number_prefix` | `0.4.0` | unmaintained | Dev/test only | `indicatif 0.17.11` | Check whether `indicatif 0.18.4` removes or changes this path. |
+| `RUSTSEC-2024-0436` | `paste` | `1.0.15` | unmaintained | Dev/test direct dependency and dev Azure path | Direct dev dependency; also `azure_core` via `azure_identity` | Review direct test usage in step 4; dev Azure update may still pull it. |
+| `RUSTSEC-2024-0370` | `proc-macro-error` | `1.0.4` | unmaintained | Dev/test only | `names 0.14.0 -> clap 3.2.25 -> clap_derive` | Consider replacing `names`; this also reduces `syn 1` duplication. |
+| `RUSTSEC-2025-0134` | `rustls-pemfile` | `1.0.4` | unmaintained | Optional `rustls` feature and dev-only `reqwest` path | Direct optional `rustls-pemfile`; `rustls-native-certs 0.6.3`; `reqwest 0.11.27` dev path | Upgrade rustls stack and dev HTTP auth stack. |
+| `RUSTSEC-2026-0097` | `rand` | `0.7.3` | unsound | Default Windows auth path and dev Azure path | `winauth 0.0.4`; `azure_identity -> http-types` | `winauth 0.0.5` still depends on `rand 0.7`; a simple bump does not remove this warning. |
+
+### Classification by Build Surface
+
+| Surface | Findings | Notes |
+| --- | --- | --- |
+| Core no-default runtime | No RustSec findings found in this pass | The compact 33-entry core graph is clean under the current lockfile audit. |
+| Default native TLS | No direct RustSec finding in this pass | The default `native-tls` path is heavy but not the source of current advisories. |
+| Default Windows auth | `rand 0.7.3` unsound warning | This only resolves on Windows targets but is part of default features. |
+| Optional `rustls` | `rustls-webpki` vulnerabilities; `rustls-pemfile` unmaintained | Highest-priority optional-feature risk because it is security-sensitive TLS code. |
+| Optional `sql-browser-async-std` | `async-std` unmaintained | The feature is explicitly tied to a discontinued runtime. |
+| Optional `sql-browser-smol` | `instant` unmaintained through old smol stack crates | Likely fixable by moving to the current smol stack. |
+| Dev/test | `atty`, `number_prefix`, `paste`, `proc-macro-error`, dev paths to `rustls-webpki`, `rustls-pemfile`, and `rand` | Large maintenance surface mostly from AAD auth test support, logging, random names, and test macros. |
+
+### Outdated Root Dependencies
+
+`cargo outdated --workspace --root-deps-only` reported these root dependency
+updates:
+
+| Package | Dependency | Current | Latest | Kind | Classification |
+| --- | --- | ---: | ---: | --- | --- |
+| `runtimes-macro` | `darling` | `0.14.4` | `0.23.0` | normal | Dev/test macro maintenance. |
+| `runtimes-macro` | `syn` | `1.0.109` | `2.0.117` | normal | Dev/test macro maintenance; may remove `syn 1` duplication. |
+| `tiberius-raw-bulk` | `async-io` | `1.13.0` | `2.6.0` | normal optional | `sql-browser-smol`; likely addresses old smol stack. |
+| `tiberius-raw-bulk` | `async-native-tls` | `0.4.0` | `0.6.0` | normal optional/default TLS | Default TLS dependency. Newer `runtime-async-std` feature is obsolete. |
+| `tiberius-raw-bulk` | `async-net` | `1.8.0` | `2.0.0` | normal optional | `sql-browser-smol`; likely addresses old smol stack. |
+| `tiberius-raw-bulk` | `asynchronous-codec` | `0.6.2` | `0.7.0` | normal | Core runtime. |
+| `tiberius-raw-bulk` | `azure_identity` | `0.5.0` | `1.0.0` | dev | AAD auth test/example support. |
+| `tiberius-raw-bulk` | `bigdecimal` | `0.3.1` | `0.4.10` | normal optional | Optional data type feature. |
+| `tiberius-raw-bulk` | `env_logger` | `0.9.3` | `0.11.10` | dev | Likely removes `atty`. |
+| `tiberius-raw-bulk` | `futures-lite` | `1.13.0` | `2.6.1` | normal optional | `sql-browser-smol`; likely addresses old smol stack. |
+| `tiberius-raw-bulk` | `indicatif` | `0.17.11` | `0.18.4` | dev | May affect `number_prefix` path. |
+| `tiberius-raw-bulk` | `indoc` | `1.0.9` | `2.0.7` | dev | Test utility. |
+| `tiberius-raw-bulk` | `libgssapi` | `0.8.3` | `0.9.1` | normal target `cfg(unix)` | Optional GSSAPI. |
+| `tiberius-raw-bulk` | `oauth2` | `4.4.2` | `5.0.0` | dev | AAD auth test/example support. |
+| `tiberius-raw-bulk` | `pretty-hex` | `0.3.0` | `0.4.2` | normal | Core runtime utility. |
+| `tiberius-raw-bulk` | `reqwest` | `0.11.27` | `0.13.4` | dev | Dev HTTP stack; contributes rustls advisories. |
+| `tiberius-raw-bulk` | `rustls-native-certs` | `0.6.3` | `0.8.3` | normal optional | Optional rustls stack. |
+| `tiberius-raw-bulk` | `rustls-pemfile` | `1.0.4` | `2.2.0` | normal optional | Optional rustls stack; advisory warning. |
+| `tiberius-raw-bulk` | `thiserror` | `1.0.69` | `2.0.18` | normal | Core runtime. |
+| `tiberius-raw-bulk` | `tokio` | `1.52.2` | `1.52.3` | normal optional/dev | Runtime/test support. |
+| `tiberius-raw-bulk` | `tokio-rustls` | `0.24.1` | `0.26.4` | normal optional | Optional rustls stack; fixes vulnerable webpki path. |
+| `tiberius-raw-bulk` | `winauth` | `0.0.4` | `0.0.5` | normal target `cfg(windows)` | Default Windows auth; latest still uses `rand 0.7`. |
+
+`cargo outdated` also warned that:
+
+- `async-native-tls` latest no longer has `runtime-async-std`.
+- `tokio-rustls` latest no longer has `dangerous_configuration`.
+
+Those are migration notes for step 3, not simple version-number edits.
+
+### Maintenance Metadata Snapshot
+
+Selected crates.io metadata checked on 2026-05-28:
+
+| Crate | Latest | Last crates.io update | Repository | Risk note |
+| --- | ---: | --- | --- | --- |
+| `async-native-tls` | `0.6.0` | `2026-02-20` | `async-email/async-native-tls` | Active enough; feature migration needed. |
+| `tokio-rustls` | `0.26.4` | `2025-09-26` | `rustls/tokio-rustls` | Active; upgrade likely needed for rustls advisory fix. |
+| `rustls-native-certs` | `0.8.3` | `2025-12-29` | `rustls/rustls-native-certs` | Active; part of rustls migration. |
+| `rustls-pemfile` | `2.2.0` | `2024-09-30` | `rustls/pemfile` | Has unmaintained advisory for old line; API may migrate toward `rustls-pki-types`. |
+| `winauth` | `0.0.5` | `2024-03-22` | `steffengy/winauth-rs` | Low activity; latest still uses `rand 0.7`. |
+| `connection-string` | `0.2.0` | `2023-03-31` | `prisma/connection-string` | No advisory, but stale and core runtime. |
+| `pretty-hex` | `0.4.2` | `2026-03-15` | `wolandr/pretty-hex` | Active enough; root is outdated. |
+| `asynchronous-codec` | `0.7.0` | `2023-10-11` | `mxinden/asynchronous-codec` | Somewhat stale; root is outdated. |
+| `async-std` | `1.13.2` | `2025-08-15` | `async-rs/async-std` | RustSec discontinued warning. |
+| `async-io` | `2.6.0` | `2025-09-14` | `smol-rs/async-io` | Active enough; current root uses old major. |
+| `async-net` | `2.0.0` | `2023-10-29` | `smol-rs/async-net` | Current root uses old major. |
+| `futures-lite` | `2.6.1` | `2025-08-04` | `smol-rs/futures-lite` | Active enough; current root uses old major. |
+| `azure_identity` | `1.0.0` | `2026-05-12` | `azure/azure-sdk-for-rust` | Active; dev root is very old. |
+| `reqwest` | `0.13.4` | `2026-05-25` | `seanmonstar/reqwest` | Active; dev root is old and contributes rustls advisory path. |
+| `oauth2` | `5.0.0` | `2025-01-21` | `ramosbugs/oauth2-rs` | Active enough; dev root is old. |
+| `env_logger` | `0.11.10` | `2026-03-23` | `rust-cli/env_logger` | Active; dev root is old. |
+| `names` | `0.14.0` | `2022-06-28` | `fnichol/names` | Stale dev root; pulls old clap/proc-macro-error path. |
+| `indicatif` | `0.18.4` | `2026-02-14` | `console-rs/indicatif` | Active; dev root is outdated. |
+| `darling` | `0.23.0` | `2025-12-03` | `TedDriggs/darling` | Active; macro crate uses old `0.14`. |
+| `syn` | `2.0.117` | `2026-02-20` | `dtolnay/syn` | Active; macro crate uses old `1`. |
+
+### Step 2 Findings
+
+- Highest priority security issue: optional `rustls` currently resolves to
+  vulnerable `rustls-webpki 0.101.7`. This affects users enabling `rustls` and
+  dev/test builds through `reqwest`.
+- Highest priority default-feature issue: default Windows auth resolves to
+  `rand 0.7.3` through `winauth`. `winauth 0.0.5` does not remove that risk.
+- Default native TLS is heavy but did not trigger the current RustSec findings.
+- The async-std SQL Browser feature has a structural maintenance problem:
+  `async-std` is discontinued.
+- The smol SQL Browser feature is on old `async-io`, `async-net`, and
+  `futures-lite` roots that pull unmaintained `instant`; this looks more
+  fixable than the async-std issue.
+- The dev/test dependency surface is the largest source of stale and
+  unmaintained crates. A focused dev-dependency refresh could remove several
+  advisories without changing runtime behavior.
+
+### Step 2 Follow-ups for Step 3
+
+1. Treat the rustls stack as a focused migration branch.
+2. Treat Windows auth as a design decision: either accept/document the current
+   `winauth` risk, fork/patch it, or replace the auth implementation.
+3. Test low-blast-radius root bumps separately: `pretty-hex`, `tokio`,
+   `env_logger`, `indoc`, and possibly `indicatif`.
+4. Test smol SQL Browser upgrades as a separate feature branch.
+5. Decide whether to keep, deprecate, or document `sql-browser-async-std`.
+6. Review direct dev usage of `paste`, `names`, `azure_identity`, `oauth2`, and
+   `reqwest` before upgrading or replacing them.
