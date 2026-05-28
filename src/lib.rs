@@ -1,5 +1,45 @@
-//! An asynchronous, runtime-independent, pure-rust Tabular Data Stream (TDS)
-//! implementation for Microsoft SQL Server.
+//! A focused raw bulk-load fork of Tiberius, an asynchronous,
+//! runtime-independent, pure-rust Tabular Data Stream (TDS) implementation for
+//! Microsoft SQL Server.
+//!
+//! This package is published as `tiberius-raw-bulk`, but the Rust library crate
+//! name remains `tiberius` for compatibility with upstream Tiberius users:
+//!
+//! ```toml
+//! tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.12" }
+//! ```
+//!
+//! The fork keeps upstream query, authentication, TLS, and connection behavior
+//! intact outside its raw bulk-load extension points. Application-specific
+//! planning, Arrow mapping, and row encoding logic belong in downstream crates.
+//!
+//! # Raw bulk-load extensions
+//!
+//! The fork adds extension points for callers that want to plan or encode bulk
+//! rows outside Tiberius while still using Tiberius for connection handling and
+//! TDS packet framing.
+//!
+//! Metadata discovery and request setup are available through:
+//!
+//! - [`Client::bulk_insert_columns`]
+//! - [`Client::bulk_insert_with_columns`]
+//! - [`BulkLoadRequest::columns`]
+//!
+//! Raw row append APIs are available through:
+//!
+//! - [`BulkLoadRequest::send_raw_row_payload`]
+//! - [`BulkLoadRequest::send_raw_rows_payload`]
+//! - [`BulkLoadRequest::send_raw_rows_payload_checked`]
+//! - [`BulkLoadRequest::send_raw_rows_with`]
+//! - [`RawRowsAppendBuffer`]
+//!
+//! Direct packet writes can be enabled with
+//! [`BulkLoadRequest::enable_direct_packet_writes`] and inspected with
+//! [`BulkLoadRequest::direct_packet_writes_enabled`].
+//!
+//! Profiling and statistics APIs are opt-in through the `bulk-load-profile`
+//! feature. When enabled, the crate exposes packet counters and write timing
+//! breakdowns for bulk-load requests.
 //!
 //! # Connecting with async-std
 //!
