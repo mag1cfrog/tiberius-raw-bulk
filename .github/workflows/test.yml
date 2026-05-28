@@ -8,36 +8,32 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v1
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
-            components: clippy
-            override: true
+          components: clippy
       - name: Install dependencies
-        run: sudo apt install -y openssl libkrb5-dev
-      - uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --features=all
+        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+      - name: Run clippy
+        run: cargo clippy --features=all
 
   format:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-          override: true
-      - uses: mbrobbel/rustfmt-check@master
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
   cargo-test-linux:
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
         database:
           - 2017
@@ -57,11 +53,11 @@ jobs:
       RUSTFLAGS: "-Dwarnings"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v2
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -70,10 +66,17 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ matrix.features }}
 
       - name: Start SQL Server ${{matrix.database}}
-        run: DOCKER_BUILDKIT=1 docker-compose -f docker-compose.yml up -d mssql-${{matrix.database}}
+        run: |
+          for attempt in 1 2 3; do
+            if DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}; then
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          exit 1
 
       - name: Install dependencies
-        run: sudo apt install -y openssl libkrb5-dev
+        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
 
       - name: Run tests
         run: cargo test ${{matrix.features}}
@@ -96,9 +99,9 @@ jobs:
       TIBERIUS_TEST_CONNECTION_STRING: "server=tcp:127.0.0.1,1433;IntegratedSecurity=true;TrustServerCertificate=true"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Set required PowerShell modules
         id: psmodulecache
@@ -108,20 +111,20 @@ jobs:
 
       - name: Setup PowerShell module cache
         id: cacher
-        uses: actions/cache@v2
+        uses: actions/cache@v5
         with:
             path: ${{ steps.psmodulecache.outputs.modulepath }}
             key: ${{ steps.psmodulecache.outputs.keygen }}
 
       - name: Setup Chocolatey download cache
         id: chococache
-        uses: actions/cache@v2
+        uses: actions/cache@v5
         with:
           path: C:\Users\runneradmin\AppData\Local\Temp\chocolatey\
           key: chocolatey-install
 
       - name: Setup Cargo build cache
-        uses: actions/cache@v2
+        uses: actions/cache@v5
         with:
           path: |
             C:\Users\runneradmin\.cargo\registry
@@ -133,8 +136,13 @@ jobs:
         if: steps.cacher.outputs.cache-hit != 'true'
         shell: powershell
         run: |
-            Set-PSRepository PSGallery -InstallationPolicy Trusted
-            Install-Module SqlServer
+            if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+              Register-PSRepository -Default
+            }
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            if (-not (Get-Module -ListAvailable -Name SqlServer)) {
+              Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber
+            }
 
       - name: Install SQL Server ${{matrix.database}}
         shell: powershell
@@ -189,29 +197,43 @@ jobs:
         run: cargo test ${{matrix.features}}
 
   cargo-test-macos:
-    runs-on: macos-12
+    runs-on: macos-15-intel
 
     strategy:
       fail-fast: false
       matrix:
-        database:
-          - 2019
-        features:
-          - "--no-default-features --features=rustls,chrono,time,tds73,sql-browser-async-std,sql-browser-tokio,sql-browser-smol,integrated-auth-gssapi,rust_decimal,bigdecimal"
-          - "--no-default-features --features=vendored-openssl"
+        include:
+          - database: 2019
+            features: "--no-default-features --features=rustls,chrono,time,tds73,sql-browser-async-std,sql-browser-tokio,sql-browser-smol,integrated-auth-gssapi,rust_decimal,bigdecimal"
+            test-target: "--lib"
+          - database: 2019
+            features: "--no-default-features --features=vendored-openssl"
+            test-target: ""
 
     env:
       TIBERIUS_TEST_CONNECTION_STRING: "server=tcp:localhost,1433;user=SA;password=<YourStrong@Passw0rd>;TrustServerCertificate=true"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
 
-      - uses: docker-practice/actions-setup-docker@master
+      - uses: docker/setup-docker-action@v5
+        if: matrix.test-target != '--lib'
+
+      - uses: docker/setup-compose-action@v1
+        if: matrix.test-target != '--lib'
 
       - name: Start SQL Server ${{matrix.database}}
-        run: DOCKER_BUILDKIT=1 docker-compose -f docker-compose.yml up -d mssql-${{matrix.database}}
+        if: matrix.test-target != '--lib'
+        run: |
+          for attempt in 1 2 3; do
+            if DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}; then
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          exit 1
 
       - name: Run tests
-        run: cargo test ${{matrix.features}}
+        run: cargo test ${{matrix.features}} ${{matrix.test-target}}

@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/mssql/server:2017-latest
 
-COPY --chmod=440 certs/server.* /certs/
-COPY --chmod=440 certs/customCA.* /certs/
+USER root
+COPY certs/server.* /certs/
+COPY certs/customCA.* /certs/
+RUN chmod 440 /certs/server.* /certs/customCA.*
 COPY docker-mssql.conf /var/opt/mssql/mssql.conf

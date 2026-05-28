@@ -1,0 +1,34 @@
+name: Dependency policy
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo-deny advisories, bans, and sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.7
+
+      - name: Check dependency policy
+        run: cargo deny check advisories bans sources
+
+      - name: Policy note
+        run: |
+          echo "deny.toml currently treats duplicate versions and wildcard dependencies as warnings."
+          echo "Advisories and unknown package sources are enforced by this workflow."
