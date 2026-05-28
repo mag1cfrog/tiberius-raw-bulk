@@ -15,7 +15,7 @@ review handoff, and later phase work in `arrow-tiberius`.
 1. Dependency inventory: complete for the initial baseline.
 2. Maintenance risk: complete for the initial baseline.
 3. Feature minimization and default feature health: complete for the initial baseline.
-4. API surface and dependency necessity: pending.
+4. API surface and dependency necessity: complete for the initial baseline.
 5. Supply-chain policy: pending.
 6. Build and graph impact: pending.
 
@@ -639,3 +639,147 @@ the maintenance warning, and decide in a later issue whether to deprecate it.
 3. Identify direct usage of `paste`, `names`, AAD dev dependencies, and
    progress/logging dev dependencies before changing them.
 4. Draft the Windows SSPI replacement spike as a separate implementation item.
+
+## Step 4: API Surface and Dependency Necessity
+
+### Commands Used
+
+```sh
+cargo machete
+rg -n "<crate-or-feature-pattern>" src tests examples runtimes-macro Cargo.toml
+cargo tree -p tiberius-raw-bulk --target all --edges normal --invert <crate>
+cargo tree -p tiberius-raw-bulk --target all --edges normal --no-default-features --features <feature> --invert <crate>
+cargo tree --workspace --target all --edges normal,dev --invert <crate>
+```
+
+`cargo machete` result:
+
+```text
+cargo-machete didn't find any unused dependencies in this directory.
+```
+
+That result is consistent with the manual scan. Every direct dependency is
+referenced by runtime code, feature-gated code, examples, tests, or the
+`runtimes-macro` crate. Step 4 therefore found no safe "delete it now" direct
+dependency removals.
+
+### Runtime Dependency Necessity
+
+| Dependency | Usage | Necessity decision |
+| --- | --- | --- |
+| `async-trait` | `SqlBrowser` trait and runtime-specific SQL Browser impls. | Keep for now. Removing it would require an API/implementation rewrite and does not address current advisories. |
+| `asynchronous-codec` | Core framed TDS packet transport and codec types. | Keep. This is central to the protocol implementation. |
+| `byteorder` | TDS binary decode/encode paths. | Keep. Replacement would be broad churn. |
+| `bytes` | Packet buffers, column data encoding, token encoding. | Keep. Core buffer abstraction. |
+| `connection-string` | ADO.NET and JDBC connection-string parsing. | Keep for now. It is stale, but replacing it would mean reimplementing public parser behavior. |
+| `encoding_rs` | Collation and non-UTF8 text encoding support. | Keep. This is protocol behavior, not convenience code. |
+| `enumflags2` | TDS flag fields in packet/token metadata. | Keep. |
+| `futures-util` | Runtime-neutral IO, streams, sinks, compatibility helpers. | Keep. Core runtime-neutral API. |
+| `num-traits` | Numeric conversions and numeric tests. | Keep. |
+| `once_cell` | Test/example connection-string statics. | Keep as dev-facing use only. Could be replaced with `std::sync::LazyLock` only if MSRV policy allows it and the churn is worth it. |
+| `pin-project-lite` | `SqlReadBytes` projection helper. | Keep. |
+| `pretty-hex` | `Connection` debug formatting for packet buffers. | Optional cleanup candidate. It is only used for debug output, but removal would save little. Prefer bumping before replacing. |
+| `thiserror` | Public/internal error derives. | Keep. |
+| `tracing` | Runtime diagnostics across connection, TLS, SQL Browser, and bulk load. | Keep. |
+| `uuid` | Public `Uuid` support and TDS GUID handling. | Keep. |
+
+`connection-string` and `pretty-hex` remain the only notable core-runtime
+necessity questions:
+
+- `connection-string` is stale, but it carries public parsing behavior. Removing
+  it is higher risk than its current audit benefit.
+- `pretty-hex` is not functionally required for protocol behavior. If strict
+  minimization becomes the priority, this is a possible removal, but a version
+  bump is the lower-risk first step.
+
+### Optional Feature Dependency Necessity
+
+| Feature/dependency | Usage | Necessity decision |
+| --- | --- | --- |
+| `native-tls` / `async-native-tls` | Default TLS stream implementation. | Keep as default for compatibility. Upgrade separately because `runtime-async-std` is obsolete in newer versions. |
+| `rustls` stack | Optional rustls TLS stream, PEM certificate loading, platform roots. | Keep optional, but migrate as a focused security branch. Not removable while README advertises it. |
+| `vendored-openssl` / `opentls` | Optional OpenTLS stream and README-documented vendored OpenSSL path. | Keep for now because it is documented and compiles. Revisit only if the TLS backend matrix should be narrowed. |
+| `sql-browser-tokio` / `tokio`, `tokio-util` | Tokio named-instance support and examples/tests/docs. | Keep. This is the preferred maintained SQL Browser runtime. |
+| `sql-browser-smol` / `async-io`, `async-net`, `futures-lite` | Smol named-instance support and required test. | Keep, but test root upgrades to the current smol stack. |
+| `sql-browser-async-std` / `async-std` | Async-std named-instance support, tests, examples, and runtime macro expansion. | Keep temporarily for compatibility, but document or deprecate because `async-std` is discontinued. |
+| `integrated-auth-gssapi` / `libgssapi` | Unix integrated auth path. | Keep optional. Needs GSSAPI headers in CI or local validation before deeper changes. |
+| `winauth` | Windows integrated and explicit Windows auth. | Replace rather than remove, as covered in step 3. |
+| `chrono` | Public date/time conversion feature and tests. | Keep. README already recommends `time` for greenfield use. |
+| `time` | Public date/time conversion feature and tests. | Keep. Preferred date/time feature for new users. |
+| `rust_decimal` | Public decimal conversion feature and tests. | Keep. |
+| `bigdecimal` | Public BigDecimal conversion feature and tests. | Keep. |
+| `bulk-load-profile` | Enables public bulk-load timing/stat structures. | Keep. It has no direct dependency impact. |
+
+No optional feature was unused. The main decision is policy, not reachability:
+whether to continue supporting the full TLS/runtime matrix. For now, the audit
+keeps the matrix and points risky parts to focused follow-up branches.
+
+### Dev Dependency Necessity
+
+| Dependency | Usage | Necessity decision |
+| --- | --- | --- |
+| `anyhow` | Examples and one integration test return type. | Keep or replace opportunistically. Low risk either way. |
+| `async-std` | Async-std examples/tests and generated runtime tests from `runtimes-macro`. | Keep while async-std runtime coverage exists. |
+| `azure_identity`, `oauth2`, `reqwest`, `url` | AAD auth example stack and transitive Azure helper paths. | Used, but high maintenance cost. Prefer updating or isolating the AAD example. |
+| `env_logger` | Test/example logging setup, including generated runtime tests. | Used. Upgrade to remove the old `atty` path. |
+| `indicatif` | `examples/bulk.rs` progress bar only. | Used narrowly. Remove or update in a small follow-up. |
+| `indoc` | One deadlock integration test SQL string. | Used narrowly. Replace with a raw string or update to `indoc 2`. |
+| `names` | Random temporary table names in bulk/query tests. | Used, but stale and pulls `clap 3`, `atty`, and `proc-macro-error`. Replace with an atomic counter or `uuid`-based helper. |
+| `paste` | Generates bulk test names in `tests/bulk.rs`. Also pulled transitively through old Azure deps. | Used, but flagged unmaintained. Replace macro usage or accept until Azure dev stack is updated. |
+| `runtimes-macro` | Expands most integration tests across async-std and Tokio. | Keep. Consider updating its `darling` and `syn` roots. |
+| `tokio`, `tokio-util` | Tokio examples, tests, doctests, and generated runtime tests. | Keep. |
+| `uuid` with `v4` | Test UUID generation. | Keep. It can also replace `names` for random table names. |
+| `chrono` | Date/time tests. | Keep while `chrono` feature tests exist. |
+
+High-value dev cleanup candidates:
+
+1. Replace `names` in tests. It is a small local usage and removing it should
+   remove the `names -> clap 3 -> atty/proc-macro-error` path.
+2. Upgrade `env_logger`. This should remove the direct `env_logger -> atty`
+   advisory path.
+3. Replace or update `indoc`. It is used in one test only.
+4. Replace or update `indicatif`. It is used in one example only and pulls
+   `number_prefix`.
+5. Review `paste`. Direct usage is limited to one test macro, but the old Azure
+   dev stack also pulls `paste` transitively.
+6. Update or isolate the AAD example stack. `azure_identity 0.5`, direct
+   `oauth2 4`, and direct `reqwest 0.11` are the largest dev-only maintenance
+   cluster and contribute old `rand`, `rustls`, and `paste` paths.
+
+### Inverted Advisory Paths Rechecked
+
+```text
+proc-macro-error -> clap 3 -> names -> tiberius-raw-bulk dev-dependencies
+atty -> clap 3 -> names -> tiberius-raw-bulk dev-dependencies
+atty -> env_logger -> tiberius-raw-bulk dev-dependencies
+number_prefix -> indicatif -> tiberius-raw-bulk dev-dependencies
+rand 0.7 -> azure_core -> azure_identity -> tiberius-raw-bulk dev-dependencies
+rand 0.7 -> winauth -> tiberius-raw-bulk
+```
+
+This confirms that several warnings can be reduced without touching runtime
+protocol behavior.
+
+### Step 4 Findings
+
+- No direct dependency is unused according to `cargo machete` and manual review.
+- Runtime dependency removal is not the best next move. Most runtime crates are
+  tied to public protocol behavior, public conversion features, or advertised
+  TLS/runtime support.
+- The best minimization opportunities are dev/test cleanup and targeted
+  replacement of `winauth`.
+- `connection-string` should not be replaced casually because it defines public
+  connection-string parsing behavior.
+- `pretty-hex` is a possible strict-minimization removal, but a bump is lower
+  risk and the current dependency cost is small.
+- The AAD example dependencies are used but expensive; updating or isolating
+  that example should be handled separately.
+
+### Step 4 Follow-ups for Step 5
+
+1. Decide which advisory warnings should be enforced by `deny.toml` immediately
+   and which should be temporarily allowed with comments.
+2. Consider opening focused cleanup issues for `names`, `env_logger`, `indoc`,
+   `indicatif`, `paste`, and the AAD example stack.
+3. Keep runtime dependency replacements separate from policy setup so advisory
+   enforcement does not get mixed with behavior changes.
