@@ -14,7 +14,7 @@ review handoff, and later phase work in `arrow-tiberius`.
 
 1. Dependency inventory: complete for the initial baseline.
 2. Maintenance risk: complete for the initial baseline.
-3. Feature minimization and default feature health: pending.
+3. Feature minimization and default feature health: complete for the initial baseline.
 4. API surface and dependency necessity: pending.
 5. Supply-chain policy: pending.
 6. Build and graph impact: pending.
@@ -458,3 +458,184 @@ Selected crates.io metadata checked on 2026-05-28:
 5. Decide whether to keep, deprecate, or document `sql-browser-async-std`.
 6. Review direct dev usage of `paste`, `names`, `azure_identity`, `oauth2`, and
    `reqwest` before upgrading or replacing them.
+
+## Step 3: Feature Minimization and Default Feature Health
+
+### Commands Used
+
+```sh
+cargo check -p tiberius-raw-bulk --no-default-features
+cargo check -p tiberius-raw-bulk
+cargo check -p tiberius-raw-bulk --all-features
+cargo check -p tiberius-raw-bulk --tests --no-default-features
+cargo check -p tiberius-raw-bulk --tests
+cargo check -p tiberius-raw-bulk --no-default-features --features native-tls
+cargo check -p tiberius-raw-bulk --no-default-features --features rustls
+cargo check -p tiberius-raw-bulk --no-default-features --features opentls
+cargo check -p tiberius-raw-bulk --no-default-features --features vendored-openssl
+cargo check -p tiberius-raw-bulk --no-default-features --features sql-browser-tokio
+cargo check -p tiberius-raw-bulk --no-default-features --features sql-browser-smol
+cargo check -p tiberius-raw-bulk --no-default-features --features sql-browser-async-std
+cargo check -p tiberius-raw-bulk --no-default-features --features integrated-auth-gssapi
+cargo check -p tiberius-raw-bulk --no-default-features --features 'chrono time rust_decimal bigdecimal bulk-load-profile tds73'
+rustup target list --installed
+cargo info windows
+cargo info winauth@0.0.5
+cargo info sspi
+cargo info mssql-auth
+cargo info ntlmclient
+cargo info kenobi
+```
+
+Candidate graph counts were also measured in a temporary manifest under
+`/tmp/tiberius-dep-audit-step3`. Those scratch files are not part of this repo.
+
+### Compile Matrix
+
+| Feature selection | Result | Notes |
+| --- | --- | --- |
+| `--no-default-features` | Pass | Two existing dead-code warnings because TLS code is not enabled. |
+| default features | Pass | Default is `tds73`, `winauth`, and `native-tls`; on Linux the Windows-only `winauth` dependency is not built. |
+| `--tests --no-default-features` | Pass | Same dead-code warnings as the no-default library check. |
+| `--tests` | Pass | Default test build compiles on this host. |
+| `native-tls` | Pass | Current default TLS backend compiles. |
+| `rustls` | Pass | Compiles, but remains blocked by the RustSec findings from step 2. |
+| `opentls` | Pass | Direct OpenTLS feature compiles. |
+| `vendored-openssl` | Pass | Feature aliases through `opentls` and compiles. |
+| `sql-browser-tokio` | Pass | Compiles. |
+| `sql-browser-smol` | Pass | Compiles, but still uses old smol-stack roots from step 2. |
+| `sql-browser-async-std` | Pass | Compiles, but depends on discontinued `async-std`. |
+| data/profile group | Pass | Checked `chrono`, `time`, `rust_decimal`, `bigdecimal`, `bulk-load-profile`, and `tds73` together. |
+| `integrated-auth-gssapi` | Blocked by host setup | `libgssapi-sys` found runtime libraries but failed because `gssapi.h` is not installed. |
+| `--all-features` | Blocked by same host setup | Fails for the same `gssapi.h` reason, not from a Rust type-check error in this crate. |
+
+Only `x86_64-unknown-linux-gnu` is installed locally, so Windows `winauth`
+compile coverage was not verified in this pass.
+
+### Default Feature Policy
+
+Current defaults:
+
+```text
+default = ["tds73", "winauth", "native-tls"]
+```
+
+Recommendation for this fork: keep the high-level default capabilities for now.
+
+- Keep `tds73` by default. It has no dependency impact and is expected protocol
+  functionality.
+- Keep TLS by default. SQL Server clients normally need encrypted connections,
+  and disabling TLS by default would be a worse user-facing behavior than
+  carrying a larger default graph.
+- Keep Windows auth as a default capability, but do not keep the current
+  `winauth` implementation indefinitely. The goal should be "Windows auth stays
+  default" while the dependency behind it changes.
+
+This means step 3 is not recommending a minimal default in the strict Cargo
+sense. It is recommending a compatibility-focused default with targeted
+remediation of the risky default dependency.
+
+### TLS Decision Notes
+
+`native-tls` is the right default TLS backend for now:
+
+- It compiles on the current host.
+- It did not trigger the current RustSec findings in step 2.
+- It is heavy, but the weight mostly comes from expected platform TLS,
+  OpenSSL, URL, IDNA, and ICU paths.
+
+The optional `rustls` backend should stay optional, but it needs a focused
+migration:
+
+- Current `tokio-rustls 0.24.1` resolves to vulnerable
+  `rustls-webpki 0.101.7`.
+- Newer `tokio-rustls` no longer has the old `dangerous_configuration` feature,
+  so this is not a simple version bump.
+- This should be handled as a separate compatibility branch with tests for
+  certificate validation and trust-root behavior.
+
+`opentls` and `vendored-openssl` compile, but `opentls` is not part of the
+default feature set. It should be reviewed in step 4 for actual usage and
+necessity before investing in it.
+
+### Windows Auth Replacement Assessment
+
+The current Windows auth dependency is `winauth 0.0.4`. The latest checked
+release, `winauth 0.0.5`, still depends on `rand 0.7`, so a direct bump does
+not remove `RUSTSEC-2026-0097`.
+
+Replacement is preferable to patching or forking `winauth`, provided the
+replacement supports both public auth modes:
+
+- `AuthMethod::Integrated`: current Windows logon session.
+- `AuthMethod::Windows`: explicit `DOMAIN\user` or user/password credentials.
+
+Current code only needs a narrow token interface:
+
+```text
+initial_token = provider.next_token(None)
+response_token = provider.next_token(Some(server_sspi_token))
+```
+
+That makes an internal adapter trait feasible and keeps the TDS login flow
+mostly unchanged.
+
+Candidate snapshot:
+
+| Candidate | Latest checked | MSRV | Approx normal graph count | Assessment |
+| --- | ---: | ---: | ---: | --- |
+| `windows` direct SSPI adapter | `0.62.2` | `1.82` | 20 | Best spike candidate. Maintained by Microsoft, much smaller than `sspi`, and matches this crate's Windows-only scope. Need to verify explicit credential support with `AcquireCredentialsHandleW` auth data. |
+| `sspi` | `0.21.0` | `1.89` | 273 | Active and feature-rich, but raises MSRV and has a very large graph. Also needs verification for current-logon integrated auth behavior. |
+| `mssql-auth` | `0.10.0` | `1.88` | 264 | SQL Server-specific and its negotiator shape matches our handshake. However `sspi-auth` pulls `sspi`; useful as a reference or possible upstream collaboration target, less attractive as a direct dependency. |
+| `ntlmclient` | `0.2.0` | unknown | 82 | Explicit NTLM client only. Does not clearly cover current-user integrated auth. |
+| `kenobi` | `0.4.1` | unknown | 26 | Small graph, but cross-platform Negotiate pulls GSSAPI on Unix and needs deeper compatibility proof for SQL Server SSPI tokens. |
+| patched or forked `winauth` | n/a | unknown | similar to current | Last resort only. It keeps us responsible for auth crypto and maintenance. |
+
+Preferred path:
+
+1. Keep the public feature name and public auth API stable for now.
+2. Add an internal `WindowsSspiProvider` adapter behind the existing `winauth`
+   feature, or introduce a replacement feature with compatibility aliases if
+   the name is changed later.
+3. Spike a native Windows SSPI implementation using the maintained `windows`
+   crate first.
+4. Verify both `Integrated` and explicit `Windows` auth against SQL Server on
+   Windows before removing `winauth`.
+5. Use `mssql-auth` and `sspi` as references if native SSPI becomes too large
+   or fails explicit credentials.
+6. Only patch or fork `winauth` if the maintained replacement path fails.
+
+### SQL Browser Runtime Decision Notes
+
+`sql-browser-tokio` should remain the preferred maintained SQL Browser runtime.
+It compiles and is on the ecosystem's dominant async runtime.
+
+`sql-browser-smol` compiles, but the root dependency versions are stale. This
+should be a separate low-risk bump attempt to `async-io 2`, `async-net 2`, and
+`futures-lite 2`.
+
+`sql-browser-async-std` compiles, but depends on a discontinued runtime. The
+least surprising policy is to keep it temporarily for compatibility, document
+the maintenance warning, and decide in a later issue whether to deprecate it.
+
+### Step 3 Findings
+
+- No-default and default builds compile on this host.
+- The current default feature set is reasonable as a user-facing policy, but
+  its Windows auth implementation needs replacement.
+- Replacing `winauth` is better than patching it if a native SSPI adapter can
+  cover both current-user and explicit credential auth.
+- A direct `windows` crate adapter looks like the best first spike because it
+  has a much smaller graph and lower MSRV than `sspi` or `mssql-auth`.
+- `rustls` should remain optional until its security-sensitive migration is
+  complete.
+- `integrated-auth-gssapi` needs CI or local setup with GSSAPI development
+  headers before it can be included in all-feature validation.
+
+### Step 3 Follow-ups for Step 4
+
+1. Review actual public API and test usage of each optional feature.
+2. Check whether `opentls` and `vendored-openssl` are still necessary.
+3. Identify direct usage of `paste`, `names`, AAD dev dependencies, and
+   progress/logging dev dependencies before changing them.
+4. Draft the Windows SSPI replacement spike as a separate implementation item.
