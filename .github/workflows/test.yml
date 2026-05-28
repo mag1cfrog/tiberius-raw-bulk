@@ -202,15 +202,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        database:
-          - 2019
-        features:
-          - "--no-default-features --features=rustls,chrono,time,tds73,sql-browser-async-std,sql-browser-tokio,sql-browser-smol,integrated-auth-gssapi,rust_decimal,bigdecimal"
-          - "--no-default-features --features=vendored-openssl"
+        include:
+          - database: 2019
+            features: "--no-default-features --features=rustls,chrono,time,tds73,sql-browser-async-std,sql-browser-tokio,sql-browser-smol,integrated-auth-gssapi,rust_decimal,bigdecimal"
+            test-target: "--lib"
+          - database: 2019
+            features: "--no-default-features --features=vendored-openssl"
+            test-target: ""
 
     env:
       TIBERIUS_TEST_CONNECTION_STRING: "server=tcp:localhost,1433;user=SA;password=<YourStrong@Passw0rd>;TrustServerCertificate=true"
-      RUST_TEST_THREADS: "1"
 
     steps:
       - uses: actions/checkout@v6
@@ -218,10 +219,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: docker/setup-docker-action@v5
+        if: matrix.test-target != '--lib'
 
       - uses: docker/setup-compose-action@v1
+        if: matrix.test-target != '--lib'
 
       - name: Start SQL Server ${{matrix.database}}
+        if: matrix.test-target != '--lib'
         run: |
           for attempt in 1 2 3; do
             if DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}; then
@@ -232,4 +236,4 @@ jobs:
           exit 1
 
       - name: Run tests
-        run: cargo test ${{matrix.features}}
+        run: cargo test ${{matrix.features}} ${{matrix.test-target}}
