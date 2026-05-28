@@ -32,7 +32,7 @@ openssl x509 -req \
   -CAserial customCA.srl \
   -out $CERT_FILE \
   -passin file:passphrase.txt \
-  -days 200
+  -days 2048
 
 echo Generating PEM format
 openssl rsa -in ${CERT_KEY_NAME}.key -out ${CERT_KEY_NAME}-nopassword.key
@@ -49,4 +49,3 @@ rm ${CERT_KEY_NAME}.sr
 rm ${CERT_KEY_NAME}-nopassword.key
 
 echo DONE
-
