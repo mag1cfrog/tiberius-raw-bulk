@@ -33,6 +33,7 @@ jobs:
 
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
         database:
           - 2017
@@ -65,7 +66,14 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ matrix.features }}
 
       - name: Start SQL Server ${{matrix.database}}
-        run: DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}
+        run: |
+          for attempt in 1 2 3; do
+            if DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}; then
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          exit 1
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
@@ -214,7 +222,14 @@ jobs:
       - uses: docker/setup-compose-action@v1
 
       - name: Start SQL Server ${{matrix.database}}
-        run: DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}
+        run: |
+          for attempt in 1 2 3; do
+            if DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}; then
+              exit 0
+            fi
+            sleep $((attempt * 30))
+          done
+          exit 1
 
       - name: Run tests
         run: cargo test ${{matrix.features}}
