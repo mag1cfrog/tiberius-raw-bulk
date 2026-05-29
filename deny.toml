@@ -6,8 +6,7 @@ no-default-features = false
 ignore = [
     { id = "RUSTSEC-2025-0052", reason = "async-std support is kept temporarily for compatibility; track deprecation or replacement separately." },
     { id = "RUSTSEC-2024-0384", reason = "instant is currently dev-only through the old Azure example stack in this deny graph; update or isolate that stack separately." },
-    { id = "RUSTSEC-2025-0119", reason = "number_prefix is dev-only through indicatif in examples/bulk.rs; update or remove indicatif separately." },
-    { id = "RUSTSEC-2024-0436", reason = "paste is used directly in tests and transitively through the old Azure example stack; replace or update separately." },
+    { id = "RUSTSEC-2024-0436", reason = "paste is still pulled transitively through the old Azure example stack; update or isolate that separately." },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is in the optional rustls stack and old dev reqwest path; migrate rustls/dev HTTP stack separately." },
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki is in the optional rustls stack and old dev reqwest path; migrate rustls/dev HTTP stack separately." },
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki is in the optional rustls stack and old dev reqwest path; migrate rustls/dev HTTP stack separately." },

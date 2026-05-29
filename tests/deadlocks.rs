@@ -1,6 +1,5 @@
 use std::env;
 
-use indoc::indoc;
 use once_cell::sync::Lazy;
 use tiberius::{error::Error, Client, Config};
 use tokio::{net::TcpStream, sync::mpsc};
@@ -48,26 +47,26 @@ async fn deadlocks_should_not_prevent_further_queries() -> anyhow::Result<()> {
     let (sender1, mut receiver1) = spawn_actor().await;
     let (sender2, mut receiver2) = spawn_actor().await;
 
-    let schema = indoc! {r#"
-        DROP TABLE IF EXISTS City;
-        DROP TABLE IF EXISTS Country;
+    let schema = r#"
+DROP TABLE IF EXISTS City;
+DROP TABLE IF EXISTS Country;
 
-        CREATE TABLE Country
-        (
-            Id         INT PRIMARY KEY,
-            Name       VARCHAR(100) not null,
-            Population INT          not null
-        );
+CREATE TABLE Country
+(
+    Id         INT PRIMARY KEY,
+    Name       VARCHAR(100) not null,
+    Population INT          not null
+);
 
-        CREATE TABLE City
-        (
-            Id         INT PRIMARY KEY,
-            CountryId  INT          not null,
-            Name       VARCHAR(100) not null,
-            Population INT          not null,
-            CONSTRAINT fk_country FOREIGN KEY (CountryId) REFERENCES Country (Id)
-        );
-    "#};
+CREATE TABLE City
+(
+    Id         INT PRIMARY KEY,
+    CountryId  INT          not null,
+    Name       VARCHAR(100) not null,
+    Population INT          not null,
+    CONSTRAINT fk_country FOREIGN KEY (CountryId) REFERENCES Country (Id)
+);
+"#;
 
     // Create a new schema defined above.
     sender1.send(schema).await?;
