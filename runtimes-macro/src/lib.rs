@@ -1,5 +1,5 @@
 extern crate proc_macro;
-use darling::FromMeta;
+use darling::{ast::NestedMeta, FromMeta};
 
 #[derive(Debug, FromMeta)]
 struct MacroArgs {
@@ -12,7 +12,12 @@ pub fn test_on_runtimes(
     args: proc_macro::TokenStream,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let attr_args = syn::parse_macro_input!(args as syn::AttributeArgs);
+    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
+        Ok(v) => v,
+        Err(e) => {
+            return proc_macro::TokenStream::from(e.to_compile_error());
+        }
+    };
 
     let args = match MacroArgs::from_list(&attr_args) {
         Ok(v) => v,
