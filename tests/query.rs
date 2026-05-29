@@ -2505,8 +2505,6 @@ async fn offset_date_time_fixed_with_time_crate_conversion<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    use time::format_description::well_known::Rfc3339;
-
     let dt = time::Date::from_calendar_date(2020, time::Month::April, 20)
         .unwrap()
         .with_hms(16, 20, 00)
@@ -2515,10 +2513,7 @@ where
 
     let row = conn
         .query(
-            format!(
-                "SELECT CAST('{}' AS datetimeoffset(7))",
-                dt.format(&Rfc3339).unwrap()
-            ),
+            "SELECT CAST('2020-04-20T16:20:00+03:00' AS datetimeoffset(7))",
             &[&dt],
         )
         .await?
