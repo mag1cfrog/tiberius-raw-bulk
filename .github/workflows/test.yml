@@ -322,8 +322,6 @@ jobs:
 
       - uses: docker/setup-docker-action@v5
         if: matrix.test-target != '--lib'
-        env:
-          LIMA_START_ARGS: --cpus 4 --memory 8
 
       - uses: docker/setup-compose-action@v1
         if: matrix.test-target != '--lib'
