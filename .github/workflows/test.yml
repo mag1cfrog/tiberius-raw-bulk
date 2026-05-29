@@ -28,6 +28,17 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  cargo-check-aad-example:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check AAD auth example
+        run: cargo check --example aad-auth --features=aad-auth-example
+
   cargo-test-linux:
     runs-on: ubuntu-latest
 
