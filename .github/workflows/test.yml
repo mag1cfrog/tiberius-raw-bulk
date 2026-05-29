@@ -161,7 +161,7 @@ jobs:
         features:
           - "--features=all"
           - "--no-default-features --features=rustls,winauth"
-          - "--no-default-features --features=vendored-openssl,winauth"
+          - "--no-default-features --features=openssl,winauth"
 
     env:
       TIBERIUS_TEST_INSTANCE: "MSSQLSERVER"
@@ -205,6 +205,38 @@ jobs:
             Start-Sleep -Seconds ($attempt * 20)
           }
           exit 1
+
+      - name: Install OpenSSL
+        if: contains(matrix.features, 'features=openssl')
+        shell: powershell
+        run: |
+          choco install openssl --version=3.6.2 --no-progress -y
+          $opensslDir = "C:\Program Files\OpenSSL-Win64"
+          if (-not (Test-Path $opensslDir)) {
+            $opensslDir = "C:\Program Files\OpenSSL"
+          }
+          if (-not (Test-Path $opensslDir)) {
+            throw "OpenSSL install directory was not found"
+          }
+
+          $includeDir = Join-Path $opensslDir "include"
+          $libDir = @(
+            (Join-Path $opensslDir "lib\VC\x64\MD"),
+            (Join-Path $opensslDir "lib\VC\x64\MT"),
+            (Join-Path $opensslDir "lib"),
+            (Join-Path $opensslDir "lib64")
+          ) | Where-Object {
+            Test-Path (Join-Path $_ "libssl.lib")
+          } | Select-Object -First 1
+
+          if (-not $libDir) {
+            throw "OpenSSL libssl.lib was not found"
+          }
+
+          "OPENSSL_DIR=$opensslDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_INCLUDE_DIR=$includeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $opensslDir "bin") | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build tests
         shell: powershell
