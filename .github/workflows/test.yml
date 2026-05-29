@@ -212,19 +212,27 @@ jobs:
 
       - name: Install required PowerShell modules
         if: steps.cacher.outputs.cache-hit != 'true'
-        shell: powershell
+        shell: pwsh
         run: |
             for ($attempt = 1; $attempt -le 3; $attempt++) {
               try {
-                if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-                  Install-PackageProvider -Name NuGet -Scope CurrentUser -Force -ErrorAction Stop
-                }
-                if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-                  Register-PSRepository -Default -ErrorAction Stop
-                }
-                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
                 if (-not (Get-Module -ListAvailable -Name SqlServer)) {
-                  Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+                  if (Get-Command Install-PSResource -ErrorAction SilentlyContinue) {
+                    if (-not (Get-PSResourceRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+                      Register-PSResourceRepository -PSGallery -ErrorAction Stop
+                    }
+                    Set-PSResourceRepository -Name PSGallery -Trusted -ErrorAction Stop
+                    Install-PSResource SqlServer -Scope CurrentUser -TrustRepository -Reinstall -ErrorAction Stop
+                  } else {
+                    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+                      Install-PackageProvider -Name NuGet -Scope CurrentUser -Force -ErrorAction Stop
+                    }
+                    if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+                      Register-PSRepository -Default -ErrorAction Stop
+                    }
+                    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+                    Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+                  }
                 }
                 exit 0
               } catch {
