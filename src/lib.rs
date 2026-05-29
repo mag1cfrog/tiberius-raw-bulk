@@ -220,22 +220,30 @@
 //!
 //! On Windows platforms, connecting to the SQL Server might require going through
 //! the SQL Browser service to get the correct port for the named instance. This
-//! feature requires either the `sql-browser-async-std` or `sql-browser-tokio` feature
-//! flag to be enabled and has a bit different way of connecting:
+//! feature requires one of the `sql-browser-smol`, `sql-browser-tokio`, or
+//! `sql-browser-async-std` feature flags to be enabled and has a bit different
+//! way of connecting.
+//!
+//! `sql-browser-async-std` is deprecated because `async-std` is discontinued
+//! upstream. It remains available for existing users. New code should prefer
+//! `sql-browser-smol` with `async_net::TcpStream` as the closest migration path,
+//! or `sql-browser-tokio` when the application already uses Tokio.
+//!
+//! The following compatibility example uses async-std:
 //!
 //! ```no_run
-//! # #[cfg(any(feature = "sql-browser-async-std", feature = "sql-browser-tokio"))]
+//! # #[cfg(feature = "sql-browser-async-std")]
 //! use tiberius::{Client, Config, AuthMethod};
-//! # #[cfg(any(feature = "sql-browser-async-std", feature = "sql-browser-tokio"))]
+//! # #[cfg(feature = "sql-browser-async-std")]
 //! use async_std::net::TcpStream;
 //!
 //! // An extra trait that allows connecting to a named instance with the given
 //! // `TcpStream`.
-//! # #[cfg(any(feature = "sql-browser-async-std", feature = "sql-browser-tokio"))]
+//! # #[cfg(feature = "sql-browser-async-std")]
 //! use tiberius::SqlBrowser;
 //!
 //! #[async_std::main]
-//! # #[cfg(any(feature = "sql-browser-async-std", feature = "sql-browser-tokio"))]
+//! # #[cfg(feature = "sql-browser-async-std")]
 //! async fn main() -> anyhow::Result<()> {
 //!     let mut config = Config::new();
 //!
@@ -260,7 +268,7 @@
 //!     # client.query("SELECT @P1", &[&-4i32]).await?;
 //!     Ok(())
 //! }
-//! # #[cfg(any(not(feature = "sql-browser-async-std"), not(feature = "sql-browser-tokio")))]
+//! # #[cfg(not(feature = "sql-browser-async-std"))]
 //! # fn main() {}
 //! ```
 //!
