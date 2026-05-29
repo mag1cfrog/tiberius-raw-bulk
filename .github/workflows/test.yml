@@ -107,6 +107,12 @@ jobs:
           done
           exit 1
 
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+
+      - name: Build tests
+        run: cargo test --no-run ${{matrix.features}}
+
       - name: Start SQL Server ${{matrix.database}}
         run: |
           for attempt in 1 2 3; do
@@ -117,8 +123,17 @@ jobs:
           done
           exit 1
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+      - name: Wait for SQL Server ${{matrix.database}}
+        run: |
+          for attempt in $(seq 1 60); do
+            if bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/1433" 2>/dev/null; then
+              exit 0
+            fi
+            docker compose -f docker-compose.yml ps mssql-${{matrix.database}}
+            sleep 5
+          done
+          docker compose -f docker-compose.yml logs mssql-${{matrix.database}}
+          exit 1
 
       - name: Run tests
         run: cargo test ${{matrix.features}}
@@ -290,6 +305,9 @@ jobs:
           done
           exit 1
 
+      - name: Build tests
+        run: cargo test --no-run ${{matrix.features}} ${{matrix.test-target}}
+
       - uses: docker/setup-docker-action@v5
         if: matrix.test-target != '--lib'
 
@@ -305,6 +323,19 @@ jobs:
             fi
             sleep $((attempt * 30))
           done
+          exit 1
+
+      - name: Wait for SQL Server ${{matrix.database}}
+        if: matrix.test-target != '--lib'
+        run: |
+          for attempt in $(seq 1 60); do
+            if bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/1433" 2>/dev/null; then
+              exit 0
+            fi
+            docker compose -f docker-compose.yml ps mssql-${{matrix.database}}
+            sleep 5
+          done
+          docker compose -f docker-compose.yml logs mssql-${{matrix.database}}
           exit 1
 
       - name: Run tests
