@@ -183,12 +183,25 @@ jobs:
         if: steps.cacher.outputs.cache-hit != 'true'
         shell: powershell
         run: |
-            if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-              Register-PSRepository -Default
-            }
-            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-            if (-not (Get-Module -ListAvailable -Name SqlServer)) {
-              Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+              try {
+                if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+                  Install-PackageProvider -Name NuGet -Scope CurrentUser -Force -ErrorAction Stop
+                }
+                if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+                  Register-PSRepository -Default -ErrorAction Stop
+                }
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+                if (-not (Get-Module -ListAvailable -Name SqlServer)) {
+                  Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+                }
+                exit 0
+              } catch {
+                if ($attempt -eq 3) {
+                  throw
+                }
+                Start-Sleep -Seconds ($attempt * 20)
+              }
             }
 
       - name: Install SQL Server ${{matrix.database}}
