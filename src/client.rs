@@ -2,6 +2,8 @@ mod auth;
 mod config;
 mod connection;
 
+#[cfg(all(windows, feature = "winauth"))]
+mod sspi;
 mod tls;
 #[cfg(any(
     feature = "rustls",

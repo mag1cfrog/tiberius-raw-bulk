@@ -65,8 +65,15 @@ connection-string = "0.2"
 num-traits = "0.2"
 uuid = "1.0"
 
-[target.'cfg(windows)'.dependencies]
-winauth = { version = "0.0.4", optional = true }
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61.2"
+optional = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_System_Rpc",
+]
 
 [target.'cfg(unix)'.dependencies]
 libgssapi = { version = "0.8.1", optional = true, default-features = false }
@@ -223,6 +230,7 @@ sql-browser-async-std = ["async-std"]
 sql-browser-tokio = ["tokio", "tokio-util"]
 sql-browser-smol = ["async-io", "async-net", "futures-lite"]
 integrated-auth-gssapi = ["libgssapi"]
+winauth = ["dep:windows-sys"]
 bigdecimal = ["bigdecimal_"]
 rustls = ["tokio-rustls", "tokio-util", "rustls-native-certs"]
 native-tls = ["async-native-tls"]
