@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   cargo-deny:
     name: cargo-deny advisories, bans, and sources
@@ -21,9 +25,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.19.7
+
+      - name: Fetch dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if cargo fetch; then
+              exit 0
+            fi
+            sleep $((attempt * 20))
+          done
+          exit 1
 
       - name: Check dependency policy
         run: cargo deny check advisories bans sources
