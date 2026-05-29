@@ -45,6 +45,11 @@ path = "tests/named-instance-smol.rs"
 name = "named-instance-smol"
 required-features = ["sql-browser-smol"]
 
+[[example]]
+path = "examples/aad-auth.rs"
+name = "aad-auth"
+required-features = ["aad-auth-example"]
+
 [dependencies]
 enumflags2 = "0.7"
 byteorder = "1.0"
@@ -138,6 +143,14 @@ optional = true
 version = "0.6"
 optional = true
 
+[dependencies.azure_core]
+version = "1"
+optional = true
+
+[dependencies.azure_identity]
+version = "1"
+optional = true
+
 [dependencies.opentls]
 version = "0.2.1"
 optional = true
@@ -173,10 +186,7 @@ path = "./runtimes-macro"
 [dev-dependencies]
 anyhow = "1"
 env_logger = "0.11"
-azure_identity = "0.5.0"
-oauth2 = "4.2.3"
 url = "2.2.2"
-reqwest = "0.11.10"
 chrono = "0.4.38"
 
 [package.metadata.docs.rs]
@@ -211,6 +221,7 @@ default = ["tds73", "winauth", "native-tls"]
 tds73 = []
 docs = []
 bulk-load-profile = []
+aad-auth-example = ["dep:azure_core", "dep:azure_identity"]
 sql-browser-async-std = ["async-std"]
 sql-browser-tokio = ["tokio", "tokio-util"]
 sql-browser-smol = ["async-io", "async-net", "futures-lite"]
