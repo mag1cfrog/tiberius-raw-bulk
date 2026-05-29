@@ -10,7 +10,7 @@ The package is published as `tiberius-raw-bulk`, but the Rust library crate name
 remains `tiberius`:
 
 ```toml
-tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.12" }
+tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.13" }
 ```
 
 This fork keeps upstream behavior intact outside the raw bulk-load extension

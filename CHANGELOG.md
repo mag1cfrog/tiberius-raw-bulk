@@ -1,5 +1,21 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.13
+
+- Complete the dependency audit follow-up work.
+- Add `cargo-deny` CI coverage for advisories, bans, duplicates, and sources.
+- Replace `winauth` with an internal Windows SSPI adapter.
+- Keep the default Windows authentication feature available.
+- Update smol SQL Browser dependency roots.
+- Remove the old `instant` dependency path from smol SQL Browser support.
+- Document `sql-browser-async-std` as deprecated.
+- Keep `sql-browser-async-std` available for compatibility.
+- Update `runtimes-macro` to current `darling` and `syn 2` roots.
+- Harden CI with updated actions and Cargo network retry settings.
+- Improve CI caching and use official SQL Server images.
+- Avoid repeated Windows SQL Server setup in CI.
+- Keep macOS CI focused on client-side compile and library tests.
+
 ## Version 0.12.3-raw-bulk.12
 
 - Add the `bulk-load-profile` feature for raw bulk-load profiling and
