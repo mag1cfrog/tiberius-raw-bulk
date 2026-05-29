@@ -129,8 +129,11 @@ jobs:
             if docker compose -f docker-compose.yml exec -T mssql-${{matrix.database}} bash -lc '
               for sqlcmd in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
                 if [ -x "$sqlcmd" ]; then
-                  "$sqlcmd" -S localhost -U SA -P "<YourStrong@Passw0rd>" -Q "SELECT 1" -b -l 5 >/dev/null 2>&1 && exit 0
-                  "$sqlcmd" -S localhost -U SA -P "<YourStrong@Passw0rd>" -Q "SELECT 1" -C -b -l 5 >/dev/null 2>&1 && exit 0
+                  trust_arg=""
+                  if "$sqlcmd" "-?" 2>&1 | grep -q -- "-C"; then
+                    trust_arg="-C"
+                  fi
+                  "$sqlcmd" -S localhost -U SA -P "<YourStrong@Passw0rd>" -Q "SELECT 1" $trust_arg -b -l 2 >/dev/null 2>&1 && exit 0
                   exit 1
                 fi
               done
@@ -343,8 +346,11 @@ jobs:
             if docker compose -f docker-compose.yml exec -T mssql-${{matrix.database}} bash -lc '
               for sqlcmd in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
                 if [ -x "$sqlcmd" ]; then
-                  "$sqlcmd" -S localhost -U SA -P "<YourStrong@Passw0rd>" -Q "SELECT 1" -b -l 5 >/dev/null 2>&1 && exit 0
-                  "$sqlcmd" -S localhost -U SA -P "<YourStrong@Passw0rd>" -Q "SELECT 1" -C -b -l 5 >/dev/null 2>&1 && exit 0
+                  trust_arg=""
+                  if "$sqlcmd" "-?" 2>&1 | grep -q -- "-C"; then
+                    trust_arg="-C"
+                  fi
+                  "$sqlcmd" -S localhost -U SA -P "<YourStrong@Passw0rd>" -Q "SELECT 1" $trust_arg -b -l 2 >/dev/null 2>&1 && exit 0
                   exit 1
                 fi
               done
