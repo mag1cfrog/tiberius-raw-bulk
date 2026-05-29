@@ -206,6 +206,10 @@ jobs:
           }
           exit 1
 
+      - name: Build tests
+        shell: powershell
+        run: cargo test --no-run ${{matrix.features}}
+
       - name: Install required PowerShell modules
         if: steps.cacher.outputs.cache-hit != 'true'
         shell: powershell
