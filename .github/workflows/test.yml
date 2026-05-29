@@ -116,7 +116,7 @@ jobs:
       - name: Start SQL Server ${{matrix.database}}
         run: |
           for attempt in 1 2 3; do
-            if DOCKER_BUILDKIT=1 docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}; then
+            if docker compose -f docker-compose.yml up -d mssql-${{matrix.database}}; then
               exit 0
             fi
             sleep $((attempt * 30))
