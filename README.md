@@ -60,7 +60,7 @@ Profiling and statistics APIs are opt-in through `bulk-load-profile`.
 | `rust_decimal`           | Read and write `numeric`/`decimal` values using `rust_decimal`'s `Decimal`.                                                      | `disabled` |
 | `bigdecimal`             | Read and write `numeric`/`decimal` values using `bigdecimal`'s `BigDecimal`.                                                     | `disabled` |
 | `bulk-load-profile`      | Expose raw bulk-load profiling and statistics APIs, including packet counters and write timing breakdowns.                       | `disabled` |
-| `sql-browser-async-std`  | SQL Browser implementation for the `TcpStream` of async-std.                                                                     | `disabled` |
+| `sql-browser-async-std`  | Deprecated SQL Browser implementation for the `TcpStream` of async-std. Kept for compatibility; prefer smol or Tokio for new code. | `disabled` |
 | `sql-browser-tokio`      | SQL Browser implementation for the `TcpStream` of Tokio.                                                                         | `disabled` |
 | `sql-browser-smol`       | SQL Browser implementation for the `TcpStream` of smol.                                                                          | `disabled` |
 | `integrated-auth-gssapi` | Support for using Integrated Auth via GSSAPI                                                                                     | `disabled` |
@@ -68,8 +68,14 @@ Profiling and statistics APIs are opt-in through `bulk-load-profile`.
 ## Compatibility Notes
 
 Tiberius accepts any socket that implements `AsyncRead` and `AsyncWrite` from
-the `futures` crate. TCP streams from async-std, Tokio, and Smol can be used
+the `futures` crate. TCP streams from Tokio, Smol, and async-std can be used
 with the matching compatibility adapters.
+
+`sql-browser-async-std` is deprecated because `async-std` is discontinued
+upstream. The feature remains available for existing users who pass
+`async_std::net::TcpStream` to Tiberius. New code should prefer
+`sql-browser-smol` with `async_net::TcpStream` as the closest migration path,
+or `sql-browser-tokio` when the application already uses Tokio.
 
 TLS is enabled by default through `native-tls`. Use `rustls`, `openssl`, or
 `vendored-openssl` if those match your deployment better. The crate can also be
