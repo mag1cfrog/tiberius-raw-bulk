@@ -67,6 +67,7 @@ jobs:
         run: cargo check --example aad-auth --features=aad-auth-example
 
   cargo-test-linux:
+    name: cargo-test-linux (${{ matrix.database }}, ${{ matrix.features.flags }})
     runs-on: ubuntu-latest
 
     strategy:
@@ -79,12 +80,18 @@ jobs:
           - 2022
           - azure-sql-edge
         features:
-          - "--features=all"
-          - "--no-default-features"
-          - "--no-default-features --features=chrono"
-          - "--no-default-features --features=time"
-          - "--no-default-features --features=rustls"
-          - "--no-default-features --features=vendored-openssl"
+          - flags: "--features=all"
+            cache-key: all
+          - flags: "--no-default-features"
+            cache-key: no-default-features
+          - flags: "--no-default-features --features=chrono"
+            cache-key: chrono
+          - flags: "--no-default-features --features=time"
+            cache-key: time
+          - flags: "--no-default-features --features=rustls"
+            cache-key: rustls
+          - flags: "--no-default-features --features=vendored-openssl"
+            cache-key: vendored-openssl
 
     env:
       TIBERIUS_TEST_CONNECTION_STRING: "server=tcp:localhost,1433;user=SA;password=<YourStrong@Passw0rd>;TrustServerCertificate=true"
@@ -96,6 +103,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cargo-test-linux-${{ matrix.features.cache-key }}
 
       - name: Fetch dependencies
         run: |
@@ -111,7 +120,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
 
       - name: Build tests
-        run: cargo test --no-run ${{matrix.features}}
+        run: cargo test --no-run ${{ matrix.features.flags }}
 
       - name: Start SQL Server ${{matrix.database}}
         run: |
@@ -148,20 +157,10 @@ jobs:
           exit 1
 
       - name: Run tests
-        run: cargo test ${{matrix.features}}
+        run: cargo test ${{ matrix.features.flags }}
 
   cargo-test-windows:
     runs-on: windows-latest
-
-    strategy:
-      fail-fast: false
-      matrix:
-        database:
-          - 2019
-        features:
-          - "--features=all"
-          - "--no-default-features --features=rustls,winauth"
-          - "--no-default-features --features=openssl,winauth"
 
     env:
       TIBERIUS_TEST_INSTANCE: "MSSQLSERVER"
@@ -207,7 +206,6 @@ jobs:
           exit 1
 
       - name: Install OpenSSL
-        if: contains(matrix.features, 'features=openssl')
         shell: powershell
         run: |
           choco install openssl --version=3.6.2 --no-progress -y
@@ -240,7 +238,20 @@ jobs:
 
       - name: Build tests
         shell: powershell
-        run: cargo test --no-run ${{matrix.features}}
+        run: |
+          $featureSets = @(
+            @("--features=all"),
+            @("--no-default-features", "--features=rustls,winauth"),
+            @("--no-default-features", "--features=openssl,winauth")
+          )
+
+          foreach ($features in $featureSets) {
+            Write-Host "cargo test --no-run $($features -join ' ')"
+            & cargo test --no-run @features
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
 
       - name: Install required PowerShell modules
         if: steps.cacher.outputs.cache-hit != 'true'
@@ -275,14 +286,14 @@ jobs:
               }
             }
 
-      - name: Install SQL Server ${{matrix.database}}
+      - name: Install SQL Server 2019
         shell: powershell
         run: |
           choco feature disable --name="'exitOnRebootDetected'"
           $ErrorActionPreference = 'SilentlyContinue'
-          choco install sql-server-${{matrix.database}} --params="'/IgnorePendingReboot'"
+          choco install sql-server-2019 --params="'/IgnorePendingReboot'"
 
-      - name: Setup SQL Server ${{matrix.database}}
+      - name: Setup SQL Server 2019
         shell: powershell
         run: |
           Import-Module 'sqlps'
@@ -325,7 +336,20 @@ jobs:
 
       - name: Run normal tests
         shell: powershell
-        run: cargo test ${{matrix.features}}
+        run: |
+          $featureSets = @(
+            @("--features=all"),
+            @("--no-default-features", "--features=rustls,winauth"),
+            @("--no-default-features", "--features=openssl,winauth")
+          )
+
+          foreach ($features in $featureSets) {
+            Write-Host "cargo test $($features -join ' ')"
+            & cargo test @features
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
 
   cargo-test-macos:
     runs-on: macos-15-intel
