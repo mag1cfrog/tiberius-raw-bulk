@@ -1,3 +1,5 @@
+#[cfg(all(windows, feature = "winauth"))]
+use super::sspi::SspiClient;
 #[cfg(any(
     feature = "rustls",
     feature = "native-tls",
@@ -40,8 +42,6 @@ use std::ops::Deref;
 use std::{cmp, fmt::Debug, io, pin::Pin, task};
 use task::Poll;
 use tracing::{event, Level};
-#[cfg(all(windows, feature = "winauth"))]
-use winauth::{windows::NtlmSspiBuilder, NextBytes};
 
 /// A `Connection` is an abstraction between the [`Client`] and the server. It
 /// can be used as a `Stream` to fetch [`Packet`]s from and to `send` packets
@@ -759,9 +759,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         match auth {
             #[cfg(all(windows, feature = "winauth"))]
             AuthMethod::Integrated => {
-                let mut client = NtlmSspiBuilder::new()
-                    .target_spn(self.context.spn())
-                    .build()?;
+                let mut client = SspiClient::integrated(self.context.spn())?;
 
                 login_message.integrated_security(client.next_bytes(None)?);
 
@@ -829,8 +827,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             #[cfg(all(windows, feature = "winauth"))]
             AuthMethod::Windows(auth) => {
                 let spn = self.context.spn().to_string();
-                let builder = winauth::NtlmV2ClientBuilder::new().target_spn(spn);
-                let mut client = builder.build(auth.domain, auth.user, auth.password);
+                let mut client =
+                    SspiClient::with_credentials(&spn, auth.domain, auth.user, auth.password)?;
 
                 login_message.integrated_security(client.next_bytes(None)?);
 
