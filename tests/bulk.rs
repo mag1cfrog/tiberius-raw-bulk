@@ -37,9 +37,11 @@ async fn random_table() -> String {
 
 macro_rules! test_bulk_type {
     ($name:ident($sql_type:literal, $total_generated:expr, $generator:expr)) => {
-        paste::item! {
+        mod $name {
+            use super::*;
+
             #[test_on_runtimes]
-            async fn [< bulk_load_optional_ $name >]<S>(mut conn: tiberius::Client<S>) -> Result<()>
+            async fn optional<S>(mut conn: tiberius::Client<S>) -> Result<()>
             where
                 S: AsyncRead + AsyncWrite + Unpin + Send,
             {
@@ -48,12 +50,11 @@ macro_rules! test_bulk_type {
                 conn.execute(
                     &format!(
                         "CREATE TABLE {} (id INT IDENTITY PRIMARY KEY, content {} NULL)",
-                        table,
-                        $sql_type,
+                        table, $sql_type,
                     ),
                     &[],
                 )
-                    .await?;
+                .await?;
 
                 let mut req = conn.bulk_insert(&table).await?;
 
@@ -71,7 +72,7 @@ macro_rules! test_bulk_type {
             }
 
             #[test_on_runtimes]
-            async fn [< bulk_load_required_ $name >]<S>(mut conn: tiberius::Client<S>) -> Result<()>
+            async fn required<S>(mut conn: tiberius::Client<S>) -> Result<()>
             where
                 S: AsyncRead + AsyncWrite + Unpin + Send,
             {
@@ -80,12 +81,11 @@ macro_rules! test_bulk_type {
                 conn.execute(
                     &format!(
                         "CREATE TABLE {} (id INT IDENTITY PRIMARY KEY, content {} NOT NULL)",
-                        table,
-                        $sql_type
+                        table, $sql_type
                     ),
                     &[],
                 )
-                    .await?;
+                .await?;
 
                 let mut req = conn.bulk_insert(&table).await?;
 

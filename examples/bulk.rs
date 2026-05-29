@@ -1,4 +1,3 @@
-use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
 use std::env;
 use tiberius::{Client, Config, IntoRow};
@@ -41,10 +40,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut req = client.bulk_insert("bulk_test1").await?;
 
-    let count = 1000i32;
-
-    let pb = ProgressBar::new(count as u64);
-
     info!("start loading data");
     for i in 0..1000 {
         let int_column = [Some(32), None][i % 2];
@@ -54,10 +49,7 @@ async fn main() -> anyhow::Result<()> {
         let row = (int_column, float_column, string_column).into_row();
 
         req.send(row).await?;
-        pb.inc(1);
     }
-
-    pb.finish_with_message("waiting...");
 
     let res = req.finalize().await?;
 
