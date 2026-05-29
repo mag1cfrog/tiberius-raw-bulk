@@ -1,8 +1,7 @@
 use futures_util::io::{AsyncRead, AsyncWrite};
-use names::{Generator, Name};
 use once_cell::sync::Lazy;
-use std::cell::RefCell;
 use std::env;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Once;
 use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
 use tiberius::{ColumnData, Result, TokenRow};
@@ -19,19 +18,11 @@ static CONN_STR: Lazy<String> = Lazy::new(|| {
     })
 });
 
-thread_local! {
-    static NAMES: RefCell<Option<Generator<'static>>> = RefCell::new(None);
-}
+static TABLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 async fn random_table() -> String {
-    NAMES.with(|maybe_generator| {
-        maybe_generator
-            .borrow_mut()
-            .get_or_insert_with(|| Generator::with_naming(Name::Plain))
-            .next()
-            .unwrap()
-            .replace('-', "")
-    })
+    let id = TABLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("tiberius_test_{}_{}", std::process::id(), id)
 }
 
 async fn create_temporal_table<S>(
