@@ -53,6 +53,7 @@ Profiling and statistics APIs are opt-in through `bulk-load-profile`.
 | `tds73`                  | Support for new date and time types in TDS version 7.3. Disable if using version 7.2.                                            | `enabled`  |
 | `native-tls`             | Use operating system's TLS libraries for traffic encryption.                                                                     | `enabled`  |
 | `rustls`                 | Use the builtin TLS implementation from rustls instead of linking to the operating system implementation for traffic encryption. | `disabled` |
+| `openssl`                | Use OpenSSL for traffic encryption, dynamically linking to a system OpenSSL installation.                                       | `disabled` |
 | `vendored-openssl`       | Statically link against OpenSSL instead of dynamically linking to the operating system implementation for traffic encryption.    | `disabled` |
 | `chrono`                 | Read and write date and time values using `chrono`'s types. (for greenfield, using time instead of chrono is recommended)        | `disabled` |
 | `time`                   | Read and write date and time values using `time` crate types.                                                                    | `disabled` |
@@ -70,7 +71,7 @@ Tiberius accepts any socket that implements `AsyncRead` and `AsyncWrite` from
 the `futures` crate. TCP streams from async-std, Tokio, and Smol can be used
 with the matching compatibility adapters.
 
-TLS is enabled by default through `native-tls`. Use `rustls` or
+TLS is enabled by default through `native-tls`. Use `rustls`, `openssl`, or
 `vendored-openssl` if those match your deployment better. The crate can also be
 compiled without TLS support, but not with multiple TLS backends enabled at the
 same time.
