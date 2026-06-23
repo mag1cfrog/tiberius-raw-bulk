@@ -10,8 +10,41 @@ env:
   CARGO_NET_RETRY: "10"
 
 jobs:
+  linux-apt-cache:
+    runs-on: ubuntu-latest
+
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.cache-key }}
+
+    steps:
+      - name: Build apt cache key
+        id: cache-key
+        run: |
+          week="$(date +%G-%V)"
+          image="${ImageOS:-ubuntu}-${ImageVersion:-unknown}"
+          echo "cache-key=linux-apt-${image}-${week}-openssl-libkrb5-dev-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Cache apt packages
+        id: apt-cache
+        uses: actions/cache@v5
+        with:
+          path: .cache/apt/archives
+          key: ${{ steps.cache-key.outputs.cache-key }}
+
+      - name: Download apt packages
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache/apt/archives/partial
+          sudo apt-get update
+          sudo apt-get install -y --download-only \
+            -o Dir::Cache::archives="$PWD/.cache/apt/archives" \
+            openssl libkrb5-dev
+          sudo chown -R "$USER:$USER" .cache/apt
+          rm -rf .cache/apt/archives/partial
+
   clippy:
     runs-on: ubuntu-latest
+    needs: linux-apt-cache
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -27,8 +60,23 @@ jobs:
             sleep $((attempt * 20))
           done
           exit 1
+      - name: Restore apt package cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/apt/archives
+          key: ${{ needs.linux-apt-cache.outputs.cache-key }}
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+        run: |
+          if compgen -G ".cache/apt/archives/*.deb" > /dev/null; then
+            sudo dpkg -i .cache/apt/archives/*.deb || {
+              sudo apt-get update
+              sudo apt-get install -y -f
+              sudo apt-get install -y openssl libkrb5-dev
+            }
+          else
+            sudo apt-get update
+            sudo apt-get install -y openssl libkrb5-dev
+          fi
       - name: Run clippy
         run: cargo clippy --features=all
 
@@ -69,6 +117,7 @@ jobs:
   cargo-test-linux:
     name: cargo-test-linux (${{ matrix.database }}, ${{ matrix.features.flags }})
     runs-on: ubuntu-latest
+    needs: linux-apt-cache
 
     strategy:
       fail-fast: false
@@ -116,8 +165,24 @@ jobs:
           done
           exit 1
 
+      - name: Restore apt package cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/apt/archives
+          key: ${{ needs.linux-apt-cache.outputs.cache-key }}
+
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+        run: |
+          if compgen -G ".cache/apt/archives/*.deb" > /dev/null; then
+            sudo dpkg -i .cache/apt/archives/*.deb || {
+              sudo apt-get update
+              sudo apt-get install -y -f
+              sudo apt-get install -y openssl libkrb5-dev
+            }
+          else
+            sudo apt-get update
+            sudo apt-get install -y openssl libkrb5-dev
+          fi
 
       - name: Build tests
         run: cargo test --no-run ${{ matrix.features.flags }}

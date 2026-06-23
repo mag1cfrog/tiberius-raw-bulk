@@ -187,6 +187,25 @@ pub(crate) mod test_support {
         (output, layer.records())
     }
 
+    /// Runs a closure with an explicit scoped no-op subscriber.
+    pub(crate) fn with_no_subscriber<F, T>(f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let _guard = capture_guard();
+
+        let output =
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                tracing_core::callsite::rebuild_interest_cache();
+                let output = f();
+                tracing_core::callsite::rebuild_interest_cache();
+                output
+            });
+        tracing_core::callsite::rebuild_interest_cache();
+
+        output
+    }
+
     /// Emits one stable smoke span and event for observability tests.
     pub(crate) fn emit_smoke_trace() {
         let smoke = tracing::span!(
@@ -403,7 +422,7 @@ mod tests {
 
     #[test]
     fn smoke_event_succeeds_without_subscriber() {
-        test_support::emit_smoke_trace();
+        test_support::with_no_subscriber(test_support::emit_smoke_trace);
     }
 
     #[test]
