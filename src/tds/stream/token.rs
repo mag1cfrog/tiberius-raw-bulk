@@ -101,28 +101,23 @@ where
         let meta = Arc::new(TokenColMetaData::decode(self.conn).await?);
         self.conn.context_mut().set_last_meta(meta.clone());
 
-        event!(Level::TRACE, ?meta);
-
         Ok(ReceivedToken::NewResultset(meta))
     }
 
     async fn get_row(&mut self) -> crate::Result<ReceivedToken> {
         let return_value = TokenRow::decode(self.conn).await?;
 
-        event!(Level::TRACE, message = ?return_value);
         Ok(ReceivedToken::Row(return_value))
     }
 
     async fn get_nbc_row(&mut self) -> crate::Result<ReceivedToken> {
         let return_value = TokenRow::decode_nbc(self.conn).await?;
 
-        event!(Level::TRACE, message = ?return_value);
         Ok(ReceivedToken::Row(return_value))
     }
 
     async fn get_return_value(&mut self) -> crate::Result<ReceivedToken> {
         let return_value = TokenReturnValue::decode(self.conn).await?;
-        event!(Level::TRACE, message = ?return_value);
         Ok(ReceivedToken::ReturnValue(return_value))
     }
 
@@ -138,13 +133,11 @@ where
             self.last_error = Some(Error::Server(err.clone()));
         }
 
-        event!(Level::ERROR, message = %err.message, code = err.code);
         Ok(ReceivedToken::Error(err))
     }
 
     async fn get_order(&mut self) -> crate::Result<ReceivedToken> {
         let order = TokenOrder::decode(self.conn).await?;
-        event!(Level::TRACE, message = ?order);
         Ok(ReceivedToken::Order(order))
     }
 
@@ -184,20 +177,16 @@ where
             _ => (),
         }
 
-        event!(Level::INFO, "{}", change);
-
         Ok(ReceivedToken::EnvChange(change))
     }
 
     async fn get_info(&mut self) -> crate::Result<ReceivedToken> {
         let info = TokenInfo::decode(self.conn).await?;
-        event!(Level::INFO, "{}", info.message);
         Ok(ReceivedToken::Info(info))
     }
 
     async fn get_login_ack(&mut self) -> crate::Result<ReceivedToken> {
         let ack = TokenLoginAck::decode(self.conn).await?;
-        event!(Level::INFO, "{} version {}", ack.prog_name, ack.version);
         Ok(ReceivedToken::LoginAck(ack))
     }
 
