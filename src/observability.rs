@@ -466,4 +466,23 @@ mod tests {
 
         records.assert_no_forbidden_text(&[leaked]);
     }
+
+    #[test]
+    fn retained_tracing_does_not_emit_representative_forbidden_text() {
+        let forbidden = [
+            "Server=tcp:example.database.windows.net;User ID=alice;Password=secret",
+            "password=secret",
+            "Bearer secret-token",
+            "SELECT * FROM sensitive_table WHERE ssn = '123-45-6789'",
+            "customer@example.com",
+            "[0xde, 0xad, 0xbe, 0xef]",
+            "BEGIN CERTIFICATE",
+        ];
+
+        let (_output, records) = test_support::capture(|| {
+            test_support::emit_smoke_trace();
+        });
+
+        records.assert_no_forbidden_text(&forbidden);
+    }
 }

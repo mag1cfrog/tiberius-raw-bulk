@@ -225,7 +225,6 @@ impl ConfigBuilderExt for ConfigBuilder<ClientConfig, WantsVerifier> {
             match roots.add(cert.clone()) {
                 Ok(_) => valid_count += 1,
                 Err(err) => {
-                    tracing::event!(Level::TRACE, "invalid cert der {:?}", cert);
                     tracing::event!(Level::DEBUG, "certificate parsing failed: {:?}", err);
                     invalid_count += 1
                 }
