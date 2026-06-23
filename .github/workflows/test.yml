@@ -265,6 +265,13 @@ jobs:
           path: C:\Users\runneradmin\AppData\Local\Temp\openssl-installer\
           key: win64-openssl-3.5.7-installer
 
+      - name: Setup OpenSSL install cache
+        id: opensslinstallcache
+        uses: actions/cache@v5
+        with:
+          path: C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.7\
+          key: win64-openssl-3.5.7-install-v1
+
       - name: Fetch dependencies
         shell: powershell
         run: |
@@ -283,32 +290,47 @@ jobs:
           $installerDir = "C:\Users\runneradmin\AppData\Local\Temp\openssl-installer"
           $installer = Join-Path $installerDir "Win64OpenSSL-3_5_7.exe"
           $installerUrl = "https://slproweb.com/download/Win64OpenSSL-3_5_7.exe"
+          $opensslDir = "C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.7"
 
-          New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+          $includeDir = Join-Path $opensslDir "include"
+          $libDir = @(
+            (Join-Path $opensslDir "lib\VC\x64\MD"),
+            (Join-Path $opensslDir "lib\VC\x64\MT"),
+            (Join-Path $opensslDir "lib"),
+            (Join-Path $opensslDir "lib64")
+          ) | Where-Object {
+            Test-Path (Join-Path $_ "libssl.lib")
+          } | Select-Object -First 1
 
-          if (-not (Test-Path $installer)) {
-            for ($attempt = 1; $attempt -le 3; $attempt++) {
-              try {
-                Invoke-WebRequest -Uri $installerUrl -OutFile $installer -UseBasicParsing
-                break
-              } catch {
-                if ($attempt -eq 3) {
-                  throw
+          if (-not ((Test-Path $includeDir) -and $libDir)) {
+            New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+
+            if (-not (Test-Path $installer)) {
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                try {
+                  Invoke-WebRequest -Uri $installerUrl -OutFile $installer -UseBasicParsing
+                  break
+                } catch {
+                  if ($attempt -eq 3) {
+                    throw
+                  }
+                  Start-Sleep -Seconds ($attempt * 20)
                 }
-                Start-Sleep -Seconds ($attempt * 20)
               }
+            }
+
+            $process = Start-Process -FilePath $installer -ArgumentList @(
+              "/silent",
+              "/sp-",
+              "/suppressmsgboxes",
+              "/norestart",
+              "/dir=$opensslDir"
+            ) -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "OpenSSL installer failed with exit code $($process.ExitCode)"
             }
           }
 
-          $process = Start-Process -FilePath $installer -ArgumentList "/silent /sp- /suppressmsgboxes /norestart" -Wait -PassThru
-          if ($process.ExitCode -ne 0) {
-            throw "OpenSSL installer failed with exit code $($process.ExitCode)"
-          }
-
-          $opensslDir = "C:\Program Files\OpenSSL-Win64"
-          if (-not (Test-Path $opensslDir)) {
-            $opensslDir = "C:\Program Files\OpenSSL"
-          }
           if (-not (Test-Path $opensslDir)) {
             throw "OpenSSL install directory was not found"
           }
