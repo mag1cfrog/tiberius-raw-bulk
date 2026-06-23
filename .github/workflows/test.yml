@@ -10,8 +10,41 @@ env:
   CARGO_NET_RETRY: "10"
 
 jobs:
+  linux-apt-cache:
+    runs-on: ubuntu-latest
+
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.cache-key }}
+
+    steps:
+      - name: Build apt cache key
+        id: cache-key
+        run: |
+          week="$(date +%G-%V)"
+          image="${ImageOS:-ubuntu}-${ImageVersion:-unknown}"
+          echo "cache-key=linux-apt-${image}-${week}-openssl-libkrb5-dev-v1" >> "$GITHUB_OUTPUT"
+
+      - name: Cache apt packages
+        id: apt-cache
+        uses: actions/cache@v5
+        with:
+          path: .cache/apt/archives
+          key: ${{ steps.cache-key.outputs.cache-key }}
+
+      - name: Download apt packages
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache/apt/archives/partial
+          sudo apt-get update
+          sudo apt-get install -y --download-only \
+            -o Dir::Cache::archives="$PWD/.cache/apt/archives" \
+            openssl libkrb5-dev
+          sudo chown -R "$USER:$USER" .cache/apt
+          rm -rf .cache/apt/archives/partial
+
   clippy:
     runs-on: ubuntu-latest
+    needs: linux-apt-cache
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -27,8 +60,23 @@ jobs:
             sleep $((attempt * 20))
           done
           exit 1
+      - name: Restore apt package cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/apt/archives
+          key: ${{ needs.linux-apt-cache.outputs.cache-key }}
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+        run: |
+          if compgen -G ".cache/apt/archives/*.deb" > /dev/null; then
+            sudo dpkg -i .cache/apt/archives/*.deb || {
+              sudo apt-get update
+              sudo apt-get install -y -f
+              sudo apt-get install -y openssl libkrb5-dev
+            }
+          else
+            sudo apt-get update
+            sudo apt-get install -y openssl libkrb5-dev
+          fi
       - name: Run clippy
         run: cargo clippy --features=all
 
@@ -69,6 +117,7 @@ jobs:
   cargo-test-linux:
     name: cargo-test-linux (${{ matrix.database }}, ${{ matrix.features.flags }})
     runs-on: ubuntu-latest
+    needs: linux-apt-cache
 
     strategy:
       fail-fast: false
@@ -116,8 +165,24 @@ jobs:
           done
           exit 1
 
+      - name: Restore apt package cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .cache/apt/archives
+          key: ${{ needs.linux-apt-cache.outputs.cache-key }}
+
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y openssl libkrb5-dev
+        run: |
+          if compgen -G ".cache/apt/archives/*.deb" > /dev/null; then
+            sudo dpkg -i .cache/apt/archives/*.deb || {
+              sudo apt-get update
+              sudo apt-get install -y -f
+              sudo apt-get install -y openssl libkrb5-dev
+            }
+          else
+            sudo apt-get update
+            sudo apt-get install -y openssl libkrb5-dev
+          fi
 
       - name: Build tests
         run: cargo test --no-run ${{ matrix.features.flags }}
@@ -193,6 +258,20 @@ jobs:
           path: C:\Users\runneradmin\AppData\Local\Temp\chocolatey\
           key: chocolatey-install
 
+      - name: Setup OpenSSL installer cache
+        id: opensslcache
+        uses: actions/cache@v5
+        with:
+          path: C:\Users\runneradmin\AppData\Local\Temp\openssl-installer\
+          key: win64-openssl-3.5.7-installer
+
+      - name: Setup OpenSSL install cache
+        id: opensslinstallcache
+        uses: actions/cache@v5
+        with:
+          path: C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.7\
+          key: win64-openssl-3.5.7-install-v1
+
       - name: Fetch dependencies
         shell: powershell
         run: |
@@ -208,11 +287,50 @@ jobs:
       - name: Install OpenSSL
         shell: powershell
         run: |
-          choco install openssl --version=3.6.2 --no-progress -y
-          $opensslDir = "C:\Program Files\OpenSSL-Win64"
-          if (-not (Test-Path $opensslDir)) {
-            $opensslDir = "C:\Program Files\OpenSSL"
+          $installerDir = "C:\Users\runneradmin\AppData\Local\Temp\openssl-installer"
+          $installer = Join-Path $installerDir "Win64OpenSSL-3_5_7.exe"
+          $installerUrl = "https://slproweb.com/download/Win64OpenSSL-3_5_7.exe"
+          $opensslDir = "C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.7"
+
+          $includeDir = Join-Path $opensslDir "include"
+          $libDir = @(
+            (Join-Path $opensslDir "lib\VC\x64\MD"),
+            (Join-Path $opensslDir "lib\VC\x64\MT"),
+            (Join-Path $opensslDir "lib"),
+            (Join-Path $opensslDir "lib64")
+          ) | Where-Object {
+            Test-Path (Join-Path $_ "libssl.lib")
+          } | Select-Object -First 1
+
+          if (-not ((Test-Path $includeDir) -and $libDir)) {
+            New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+
+            if (-not (Test-Path $installer)) {
+              for ($attempt = 1; $attempt -le 3; $attempt++) {
+                try {
+                  Invoke-WebRequest -Uri $installerUrl -OutFile $installer -UseBasicParsing
+                  break
+                } catch {
+                  if ($attempt -eq 3) {
+                    throw
+                  }
+                  Start-Sleep -Seconds ($attempt * 20)
+                }
+              }
+            }
+
+            $process = Start-Process -FilePath $installer -ArgumentList @(
+              "/silent",
+              "/sp-",
+              "/suppressmsgboxes",
+              "/norestart",
+              "/dir=$opensslDir"
+            ) -Wait -PassThru
+            if ($process.ExitCode -ne 0) {
+              throw "OpenSSL installer failed with exit code $($process.ExitCode)"
+            }
           }
+
           if (-not (Test-Path $opensslDir)) {
             throw "OpenSSL install directory was not found"
           }
