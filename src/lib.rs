@@ -306,6 +306,8 @@ mod macros;
 
 mod client;
 mod from_sql;
+#[allow(dead_code)]
+mod observability;
 mod query;
 mod sql_read_bytes;
 mod to_sql;
