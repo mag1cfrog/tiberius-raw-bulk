@@ -16,7 +16,7 @@
 //! values, raw packet bytes, certificate DER bytes, raw token debug output, or
 //! arbitrary server-returned message text.
 
-use crate::{EncryptionLevel, Error};
+use crate::{client::AuthMethod, EncryptionLevel, Error};
 use std::time::Duration;
 use tracing::{Level, Span};
 
@@ -36,6 +36,12 @@ pub(crate) mod field {
 pub(crate) mod span {
     /// Connection setup span for an already-open transport stream.
     pub(crate) const CONNECTION_CONNECT: &str = "protocol.connection.connect";
+
+    /// TLS negotiation span.
+    pub(crate) const TLS_NEGOTIATION: &str = "protocol.tls.negotiation";
+
+    /// Login and authentication flow span.
+    pub(crate) const LOGIN_FLOW: &str = "protocol.login.flow";
 
     /// Smoke span used to validate the observability contract helper.
     pub(crate) const SMOKE: &str = "protocol.smoke";
@@ -64,6 +70,39 @@ pub(crate) mod event {
     /// Prelogin failed.
     pub(crate) const CONNECTION_PRELOGIN_FAILED: &str = "protocol.connection.prelogin.failed";
 
+    /// TLS negotiation span marker event.
+    pub(crate) const TLS_NEGOTIATION: &str = "protocol.tls.negotiation";
+
+    /// TLS negotiation started.
+    pub(crate) const TLS_NEGOTIATION_START: &str = "protocol.tls.negotiation.start";
+
+    /// TLS negotiation completed.
+    pub(crate) const TLS_NEGOTIATION_COMPLETED: &str = "protocol.tls.negotiation.completed";
+
+    /// TLS negotiation failed.
+    pub(crate) const TLS_NEGOTIATION_FAILED: &str = "protocol.tls.negotiation.failed";
+
+    /// TLS trust configuration selected.
+    pub(crate) const TLS_TRUST_CONFIG: &str = "protocol.tls.trust_config";
+
+    /// TLS root certificates loaded.
+    pub(crate) const TLS_ROOT_CERTIFICATES_LOADED: &str = "protocol.tls.root_certificates.loaded";
+
+    /// TLS was downgraded after login.
+    pub(crate) const TLS_POST_LOGIN_DOWNGRADED: &str = "protocol.tls.post_login.downgraded";
+
+    /// Login flow span marker event.
+    pub(crate) const LOGIN_FLOW: &str = "protocol.login.flow";
+
+    /// Login flow started.
+    pub(crate) const LOGIN_FLOW_START: &str = "protocol.login.flow.start";
+
+    /// Login flow completed.
+    pub(crate) const LOGIN_FLOW_COMPLETED: &str = "protocol.login.flow.completed";
+
+    /// Login flow failed.
+    pub(crate) const LOGIN_FLOW_FAILED: &str = "protocol.login.flow.failed";
+
     /// Smoke event used to validate the observability contract helper.
     pub(crate) const SMOKE: &str = "protocol.smoke";
 }
@@ -82,6 +121,83 @@ pub(crate) fn connection_connect_span(
         operation = "connect",
         requested_encryption = encryption_level_name(requested_encryption),
         fed_auth_required = fed_auth_required,
+    )
+}
+
+/// Returns the safe TLS backend name for the active feature path.
+#[cfg(feature = "rustls")]
+pub(crate) fn tls_backend_name() -> &'static str {
+    "rustls"
+}
+
+/// Returns the safe TLS backend name for the active feature path.
+#[cfg(all(not(feature = "rustls"), feature = "native-tls"))]
+pub(crate) fn tls_backend_name() -> &'static str {
+    "native_tls"
+}
+
+/// Returns the safe TLS backend name for the active feature path.
+#[cfg(all(
+    not(feature = "rustls"),
+    not(feature = "native-tls"),
+    feature = "vendored-openssl"
+))]
+pub(crate) fn tls_backend_name() -> &'static str {
+    "vendored_openssl"
+}
+
+/// Returns the safe TLS backend name when no TLS backend is compiled in.
+#[cfg(not(any(
+    feature = "rustls",
+    feature = "native-tls",
+    feature = "vendored-openssl"
+)))]
+pub(crate) fn tls_backend_name() -> &'static str {
+    "none"
+}
+
+/// Returns a safe authentication method category.
+pub(crate) fn auth_method_category(auth: &AuthMethod) -> &'static str {
+    match auth {
+        AuthMethod::SqlServer(_) => "sql_server",
+        #[cfg(any(all(windows, feature = "winauth"), doc))]
+        AuthMethod::Windows(_) => "windows",
+        #[cfg(any(
+            all(windows, feature = "winauth"),
+            all(unix, feature = "integrated-auth-gssapi"),
+            doc
+        ))]
+        AuthMethod::Integrated => "integrated",
+        AuthMethod::AADToken(_) => "aad_token",
+        AuthMethod::None => "none",
+    }
+}
+
+/// Creates the stable TLS negotiation span.
+pub(crate) fn tls_negotiation_span(encryption: EncryptionLevel, tls_backend: &'static str) -> Span {
+    tracing::span!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        span::TLS_NEGOTIATION,
+        telemetry_event = event::TLS_NEGOTIATION,
+        phase = "tls",
+        operation = "negotiate",
+        tls_backend = tls_backend,
+        encryption = encryption_level_name(encryption),
+    )
+}
+
+/// Creates the stable login/auth flow span.
+pub(crate) fn login_flow_span(encryption: EncryptionLevel, auth_method: &'static str) -> Span {
+    tracing::span!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        span::LOGIN_FLOW,
+        telemetry_event = event::LOGIN_FLOW,
+        phase = "login",
+        operation = "authenticate",
+        auth_method = auth_method,
+        encryption = encryption_level_name(encryption),
     )
 }
 
@@ -178,6 +294,167 @@ pub(crate) fn emit_prelogin_failed(prelogin_elapsed: Duration, error: &Error) {
         operation = "prelogin",
         status = "failed",
         prelogin_elapsed_ms = duration_ms(prelogin_elapsed),
+        error_category = error_category(error),
+    );
+}
+
+/// Emits the stable TLS negotiation start event.
+pub(crate) fn emit_tls_negotiation_start(encryption: EncryptionLevel, tls_backend: &'static str) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        telemetry_event = event::TLS_NEGOTIATION_START,
+        phase = "tls",
+        operation = "negotiate",
+        status = "started",
+        tls_backend = tls_backend,
+        encryption = encryption_level_name(encryption),
+    );
+}
+
+/// Emits the stable TLS negotiation completed event.
+pub(crate) fn emit_tls_negotiation_completed(
+    tls_elapsed: Duration,
+    encryption: EncryptionLevel,
+    tls_backend: &'static str,
+    tls_used: bool,
+) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        telemetry_event = event::TLS_NEGOTIATION_COMPLETED,
+        phase = "tls",
+        operation = "negotiate",
+        status = "completed",
+        tls_elapsed_ms = duration_ms(tls_elapsed),
+        tls_backend = tls_backend,
+        encryption = encryption_level_name(encryption),
+        tls_used = tls_used,
+    );
+}
+
+/// Emits the stable TLS negotiation failed event.
+pub(crate) fn emit_tls_negotiation_failed(
+    tls_elapsed: Duration,
+    encryption: EncryptionLevel,
+    tls_backend: &'static str,
+    error: &Error,
+) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::WARN,
+        telemetry_event = event::TLS_NEGOTIATION_FAILED,
+        phase = "tls",
+        operation = "negotiate",
+        status = "failed",
+        tls_elapsed_ms = duration_ms(tls_elapsed),
+        tls_backend = tls_backend,
+        encryption = encryption_level_name(encryption),
+        error_category = error_category(error),
+    );
+}
+
+/// Emits the stable TLS trust configuration event.
+pub(crate) fn emit_tls_trust_config(
+    tls_backend: &'static str,
+    trust_mode: &'static str,
+    certificate_validation: bool,
+) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        telemetry_event = event::TLS_TRUST_CONFIG,
+        phase = "tls",
+        operation = "configure_trust",
+        tls_backend = tls_backend,
+        trust_mode = trust_mode,
+        certificate_validation = certificate_validation,
+    );
+}
+
+/// Emits the stable root certificate loading summary event.
+pub(crate) fn emit_tls_root_certificates_loaded(
+    tls_backend: &'static str,
+    valid_count: u64,
+    invalid_count: u64,
+) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        telemetry_event = event::TLS_ROOT_CERTIFICATES_LOADED,
+        phase = "tls",
+        operation = "load_root_certificates",
+        tls_backend = tls_backend,
+        valid_count = valid_count,
+        invalid_count = invalid_count,
+    );
+}
+
+/// Emits the stable post-login TLS downgrade event.
+pub(crate) fn emit_tls_post_login_downgraded(encryption: EncryptionLevel) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::WARN,
+        telemetry_event = event::TLS_POST_LOGIN_DOWNGRADED,
+        phase = "tls",
+        operation = "post_login_encryption",
+        status = "downgraded",
+        encryption = encryption_level_name(encryption),
+        tls_used = false,
+        downgraded = true,
+    );
+}
+
+/// Emits the stable login flow start event.
+pub(crate) fn emit_login_flow_start(encryption: EncryptionLevel, auth_method: &'static str) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        telemetry_event = event::LOGIN_FLOW_START,
+        phase = "login",
+        operation = "authenticate",
+        status = "started",
+        encryption = encryption_level_name(encryption),
+        auth_method = auth_method,
+    );
+}
+
+/// Emits the stable login flow completed event.
+pub(crate) fn emit_login_flow_completed(
+    login_elapsed: Duration,
+    encryption: EncryptionLevel,
+    auth_method: &'static str,
+) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        telemetry_event = event::LOGIN_FLOW_COMPLETED,
+        phase = "login",
+        operation = "authenticate",
+        status = "completed",
+        login_elapsed_ms = duration_ms(login_elapsed),
+        encryption = encryption_level_name(encryption),
+        auth_method = auth_method,
+    );
+}
+
+/// Emits the stable login flow failed event.
+pub(crate) fn emit_login_flow_failed(
+    login_elapsed: Duration,
+    encryption: EncryptionLevel,
+    auth_method: &'static str,
+    error: &Error,
+) {
+    tracing::event!(
+        target: target::PROTOCOL,
+        Level::WARN,
+        telemetry_event = event::LOGIN_FLOW_FAILED,
+        phase = "login",
+        operation = "authenticate",
+        status = "failed",
+        login_elapsed_ms = duration_ms(login_elapsed),
+        encryption = encryption_level_name(encryption),
+        auth_method = auth_method,
         error_category = error_category(error),
     );
 }
@@ -770,6 +1047,201 @@ mod tests {
             .event(event::CONNECTION_PRELOGIN_FAILED)
             .unwrap_or_else(|| panic!("missing prelogin failed event in {records:?}"));
         prelogin_failed.assert_field("error_category", "protocol");
+    }
+
+    #[test]
+    fn tls_login_helpers_emit_structured_fields() {
+        let (_output, records) = test_support::capture(|| {
+            let tls = super::tls_negotiation_span(EncryptionLevel::Required, "rustls");
+            let _tls_entered = tls.enter();
+
+            super::emit_tls_negotiation_start(EncryptionLevel::Required, "rustls");
+            super::emit_tls_trust_config("rustls", "default", true);
+            super::emit_tls_root_certificates_loaded("rustls", 100, 2);
+            super::emit_tls_negotiation_completed(
+                Duration::from_millis(8),
+                EncryptionLevel::On,
+                "rustls",
+                true,
+            );
+
+            let login = super::login_flow_span(EncryptionLevel::On, "sql_server");
+            let _login_entered = login.enter();
+
+            super::emit_login_flow_start(EncryptionLevel::On, "sql_server");
+            super::emit_login_flow_completed(
+                Duration::from_millis(11),
+                EncryptionLevel::On,
+                "sql_server",
+            );
+        });
+
+        let tls_span = records
+            .span(super::span::TLS_NEGOTIATION)
+            .unwrap_or_else(|| panic!("missing tls span in {records:?}"));
+        tls_span.assert_field(super::field::TELEMETRY_EVENT, event::TLS_NEGOTIATION);
+        tls_span.assert_field("phase", "tls");
+        tls_span.assert_field("operation", "negotiate");
+        tls_span.assert_field("tls_backend", "rustls");
+        tls_span.assert_field("encryption", "required");
+
+        let trust = records
+            .event(event::TLS_TRUST_CONFIG)
+            .unwrap_or_else(|| panic!("missing tls trust event in {records:?}"));
+        trust.assert_field("trust_mode", "default");
+        trust.assert_field("certificate_validation", "true");
+
+        let roots = records
+            .event(event::TLS_ROOT_CERTIFICATES_LOADED)
+            .unwrap_or_else(|| panic!("missing tls root event in {records:?}"));
+        roots.assert_field("valid_count", "100");
+        roots.assert_field("invalid_count", "2");
+
+        let tls_completed = records
+            .event(event::TLS_NEGOTIATION_COMPLETED)
+            .unwrap_or_else(|| panic!("missing tls completed event in {records:?}"));
+        tls_completed.assert_field("tls_elapsed_ms", "8");
+        tls_completed.assert_field("tls_used", "true");
+
+        let login_span = records
+            .span(super::span::LOGIN_FLOW)
+            .unwrap_or_else(|| panic!("missing login span in {records:?}"));
+        login_span.assert_field(super::field::TELEMETRY_EVENT, event::LOGIN_FLOW);
+        login_span.assert_field("auth_method", "sql_server");
+
+        let login_completed = records
+            .event(event::LOGIN_FLOW_COMPLETED)
+            .unwrap_or_else(|| panic!("missing login completed event in {records:?}"));
+        login_completed.assert_field("login_elapsed_ms", "11");
+        login_completed.assert_field("auth_method", "sql_server");
+    }
+
+    #[test]
+    fn tls_login_helpers_succeed_without_subscriber() {
+        test_support::with_no_subscriber(|| {
+            let tls = super::tls_negotiation_span(EncryptionLevel::Required, "native_tls");
+            let _tls_entered = tls.enter();
+
+            super::emit_tls_negotiation_start(EncryptionLevel::Required, "native_tls");
+            super::emit_tls_negotiation_failed(
+                Duration::from_millis(2),
+                EncryptionLevel::Required,
+                "native_tls",
+                &Error::Tls("certificate PEM secret".to_string()),
+            );
+            super::emit_tls_post_login_downgraded(EncryptionLevel::Off);
+
+            let login = super::login_flow_span(EncryptionLevel::Off, "aad_token");
+            let _login_entered = login.enter();
+
+            super::emit_login_flow_start(EncryptionLevel::Off, "aad_token");
+            super::emit_login_flow_failed(
+                Duration::from_millis(4),
+                EncryptionLevel::Off,
+                "aad_token",
+                &Error::Protocol(Cow::Borrowed("Bearer secret-token")),
+            );
+        });
+    }
+
+    #[test]
+    fn tls_login_helpers_preserve_active_caller_parent_span() {
+        let (_output, records) = test_support::capture(|| {
+            let caller = tracing::span!(Level::INFO, "caller.request");
+            let _caller_entered = caller.enter();
+
+            let tls = super::tls_negotiation_span(EncryptionLevel::Required, "rustls");
+            let _tls_entered = tls.enter();
+            super::emit_tls_negotiation_start(EncryptionLevel::Required, "rustls");
+
+            let login = super::login_flow_span(EncryptionLevel::On, "integrated");
+            let _login_entered = login.enter();
+            super::emit_login_flow_start(EncryptionLevel::On, "integrated");
+        });
+
+        let tls_span = records
+            .span(super::span::TLS_NEGOTIATION)
+            .unwrap_or_else(|| panic!("missing tls span in {records:?}"));
+        assert_eq!(Some("caller.request"), tls_span.parent_span_name.as_deref());
+
+        let tls_start = records
+            .event(event::TLS_NEGOTIATION_START)
+            .unwrap_or_else(|| panic!("missing tls start event in {records:?}"));
+        assert_eq!(
+            Some(super::span::TLS_NEGOTIATION),
+            tls_start.parent_span_name.as_deref()
+        );
+
+        let login_span = records
+            .span(super::span::LOGIN_FLOW)
+            .unwrap_or_else(|| panic!("missing login span in {records:?}"));
+        assert_eq!(
+            Some(super::span::TLS_NEGOTIATION),
+            login_span.parent_span_name.as_deref()
+        );
+
+        let login_start = records
+            .event(event::LOGIN_FLOW_START)
+            .unwrap_or_else(|| panic!("missing login start event in {records:?}"));
+        assert_eq!(
+            Some(super::span::LOGIN_FLOW),
+            login_start.parent_span_name.as_deref()
+        );
+    }
+
+    #[test]
+    fn tls_login_helpers_do_not_emit_forbidden_text() {
+        let forbidden = [
+            "-----BEGIN CERTIFICATE-----",
+            "MIICsecretDER",
+            "DOMAIN",
+            "alice",
+            "password=secret",
+            "Bearer secret-token",
+            "SSPI_PAYLOAD_BYTES",
+            "GSSAPI_PAYLOAD_BYTES",
+            "Server=tcp:example.database.windows.net",
+            "database-secret-name",
+            "app-secret-name",
+        ];
+
+        let (_output, records) = test_support::capture(|| {
+            let tls = super::tls_negotiation_span(EncryptionLevel::Required, "rustls");
+            let _tls_entered = tls.enter();
+
+            super::emit_tls_trust_config("rustls", "ca_certificate", true);
+            super::emit_tls_root_certificates_loaded("rustls", 1, 1);
+            super::emit_tls_negotiation_failed(
+                Duration::from_millis(3),
+                EncryptionLevel::Required,
+                "rustls",
+                &Error::Tls("-----BEGIN CERTIFICATE----- MIICsecretDER".to_string()),
+            );
+
+            let login = super::login_flow_span(EncryptionLevel::On, "windows");
+            let _login_entered = login.enter();
+
+            super::emit_login_flow_failed(
+                Duration::from_millis(5),
+                EncryptionLevel::On,
+                "windows",
+                &Error::Protocol(Cow::Borrowed(
+                    "DOMAIN alice password=secret Bearer secret-token SSPI_PAYLOAD_BYTES",
+                )),
+            );
+        });
+
+        records.assert_no_forbidden_text(&forbidden);
+
+        let tls_failed = records
+            .event(event::TLS_NEGOTIATION_FAILED)
+            .unwrap_or_else(|| panic!("missing tls failed event in {records:?}"));
+        tls_failed.assert_field("error_category", "tls");
+
+        let login_failed = records
+            .event(event::LOGIN_FLOW_FAILED)
+            .unwrap_or_else(|| panic!("missing login failed event in {records:?}"));
+        login_failed.assert_field("error_category", "protocol");
     }
 
     #[test]

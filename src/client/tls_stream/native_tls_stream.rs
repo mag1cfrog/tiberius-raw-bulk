@@ -1,12 +1,12 @@
 use crate::{
     client::{config::Config, TrustConfig},
     error::{Error, IoErrorKind},
+    observability,
 };
 pub(crate) use async_native_tls::TlsStream;
 use async_native_tls::{Certificate, TlsConnector};
 use futures_util::io::{AsyncRead, AsyncWrite};
 use std::fs;
-use tracing::{event, Level};
 
 pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
     config: &Config,
@@ -16,15 +16,21 @@ pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     match &config.trust {
         TrustConfig::CaCertificateLocation(path) => {
+            observability::emit_tls_trust_config(
+                observability::tls_backend_name(),
+                "ca_certificate",
+                true,
+            );
+
             if let Ok(buf) = fs::read(path) {
                 let cert = match path.extension() {
                         Some(ext)
-                        if ext.to_ascii_lowercase() == "pem"
-                            || ext.to_ascii_lowercase() == "crt" =>
+                        if ext.eq_ignore_ascii_case("pem")
+                            || ext.eq_ignore_ascii_case("crt") =>
                             {
                                 Some(Certificate::from_pem(&buf)?)
                             }
-                        Some(ext) if ext.to_ascii_lowercase() == "der" => {
+                        Some(ext) if ext.eq_ignore_ascii_case("der") => {
                             Some(Certificate::from_der(&buf)?)
                         }
                         Some(_) | None => return Err(Error::Io {
@@ -42,9 +48,10 @@ pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
             }
         }
         TrustConfig::TrustAll => {
-            event!(
-                Level::WARN,
-                "Trusting the server certificate without validation."
+            observability::emit_tls_trust_config(
+                observability::tls_backend_name(),
+                "trust_all",
+                false,
             );
 
             builder = builder.danger_accept_invalid_certs(true);
@@ -52,7 +59,11 @@ pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
             builder = builder.use_sni(false);
         }
         TrustConfig::Default => {
-            event!(Level::INFO, "Using default trust configuration.");
+            observability::emit_tls_trust_config(
+                observability::tls_backend_name(),
+                "default",
+                true,
+            );
         }
     }
 
