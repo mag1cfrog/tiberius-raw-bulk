@@ -37,13 +37,6 @@ use std::{
     pin::Pin,
     task::{self, Poll},
 };
-#[cfg(any(
-    feature = "rustls",
-    feature = "native-tls",
-    feature = "vendored-openssl"
-))]
-use tracing::{event, Level};
-
 /// A wrapper to handle either TLS or bare connections.
 pub(crate) enum MaybeTlsStream<S: AsyncRead + AsyncWrite + Unpin + Send> {
     Raw(S),
@@ -222,12 +215,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncRead for TlsPreloginWrapper<
 
             // And we know from this point on how much data we should expect
             inner.read_remaining = header.length() as usize - HEADER_BYTES;
-
-            event!(
-                Level::TRACE,
-                "Reading packet of {} bytes",
-                inner.read_remaining,
-            );
         }
 
         let max_read = cmp::min(inner.read_remaining, buf.len());
@@ -292,12 +279,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncWrite for TlsPreloginWrapper
             }
 
             while !inner.wr_buf.is_empty() {
-                event!(
-                    Level::TRACE,
-                    "Writing a packet of {} bytes",
-                    inner.wr_buf.len(),
-                );
-
                 let written = ready!(
                     Pin::new(&mut inner.stream.as_mut().unwrap()).poll_write(cx, &inner.wr_buf)
                 )?;

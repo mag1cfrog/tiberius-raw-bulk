@@ -1,7 +1,7 @@
 use crate::{
     client::{config::Config, TrustConfig},
     error::IoErrorKind,
-    Error,
+    observability, Error,
 };
 use futures_util::io::{AsyncRead, AsyncWrite};
 use std::{
@@ -24,7 +24,6 @@ use tokio_rustls::{
     TlsConnector,
 };
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
-use tracing::{event, Level};
 
 impl From<tokio_rustls::rustls::Error> for Error {
     fn from(e: tokio_rustls::rustls::Error) -> Self {
@@ -96,12 +95,16 @@ fn get_server_name(config: &Config) -> crate::Result<ServerName<'static>> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> TlsStream<S> {
     pub(super) async fn new(config: &Config, stream: S) -> crate::Result<Self> {
-        event!(Level::INFO, "Performing a TLS handshake");
-
         let builder = ClientConfig::builder();
 
         let client_config = match &config.trust {
             TrustConfig::CaCertificateLocation(path) => {
+                observability::emit_tls_trust_config(
+                    observability::tls_backend_name(),
+                    "ca_certificate",
+                    true,
+                );
+
                 if let Ok(buf) = fs::read(path) {
                     let cert = match path.extension() {
                             Some(ext)
@@ -149,18 +152,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> TlsStream<S> {
                 }
             }
             TrustConfig::TrustAll => {
-                event!(
-                    Level::WARN,
-                    "Trusting the server certificate without validation."
+                observability::emit_tls_trust_config(
+                    observability::tls_backend_name(),
+                    "trust_all",
+                    false,
                 );
+
                 builder
                     .dangerous()
                     .with_custom_certificate_verifier(Arc::new(NoCertVerifier {}))
                     .with_no_client_auth()
             }
             TrustConfig::Default => {
-                event!(Level::INFO, "Using default trust configuration.");
-                builder.with_native_roots().with_no_client_auth()
+                observability::emit_tls_trust_config(
+                    observability::tls_backend_name(),
+                    "default",
+                    true,
+                );
+                builder.with_native_roots()?.with_no_client_auth()
             }
         };
 
@@ -211,33 +220,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> AsyncWrite for TlsStream<S> {
 }
 
 trait ConfigBuilderExt {
-    fn with_native_roots(self) -> ConfigBuilder<ClientConfig, WantsClientCert>;
+    fn with_native_roots(self) -> crate::Result<ConfigBuilder<ClientConfig, WantsClientCert>>;
 }
 
 impl ConfigBuilderExt for ConfigBuilder<ClientConfig, WantsVerifier> {
-    fn with_native_roots(self) -> ConfigBuilder<ClientConfig, WantsClientCert> {
+    fn with_native_roots(self) -> crate::Result<ConfigBuilder<ClientConfig, WantsClientCert>> {
         let mut roots = RootCertStore::empty();
         let mut valid_count = 0;
         let mut invalid_count = 0;
 
-        for cert in rustls_native_certs::load_native_certs().expect("could not load platform certs")
-        {
+        let cert_result = rustls_native_certs::load_native_certs();
+        invalid_count += u64::try_from(cert_result.errors.len()).unwrap_or(u64::MAX);
+
+        for cert in cert_result.certs {
             match roots.add(cert.clone()) {
                 Ok(_) => valid_count += 1,
-                Err(err) => {
-                    tracing::event!(Level::DEBUG, "certificate parsing failed: {:?}", err);
-                    invalid_count += 1
-                }
+                Err(_) => invalid_count += 1,
             }
         }
-        tracing::event!(
-            Level::TRACE,
-            "with_native_roots processed {} valid and {} invalid certs",
+
+        observability::emit_tls_root_certificates_loaded(
+            observability::tls_backend_name(),
             valid_count,
-            invalid_count
+            invalid_count,
         );
         assert!(!roots.is_empty(), "no CA certificates found");
 
-        self.with_root_certificates(roots)
+        Ok(self.with_root_certificates(roots))
     }
 }

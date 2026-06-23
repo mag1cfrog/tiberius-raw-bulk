@@ -206,20 +206,49 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
         let connection = connection.tls_handshake(&config, encryption).await?;
 
-        let mut connection = connection
-            .login(
-                config.auth,
-                encryption,
-                config.database,
-                config.host,
-                config.application_name,
-                config.packet_size,
-                config.readonly,
-                prelogin,
-            )
-            .await?;
+        let auth_method = observability::auth_method_category(&config.auth);
+        let login_span = observability::login_flow_span(encryption, auth_method);
+        let login_start = Instant::now();
+        let connection = async move {
+            observability::emit_login_flow_start(encryption, auth_method);
 
-        connection.flush_done().await?;
+            let result = async {
+                let mut connection = connection
+                    .login(
+                        config.auth,
+                        encryption,
+                        config.database,
+                        config.host,
+                        config.application_name,
+                        config.packet_size,
+                        config.readonly,
+                        prelogin,
+                    )
+                    .await?;
+
+                connection.flush_done().await?;
+                Ok(connection)
+            }
+            .await;
+
+            match &result {
+                Ok(_) => observability::emit_login_flow_completed(
+                    login_start.elapsed(),
+                    encryption,
+                    auth_method,
+                ),
+                Err(error) => observability::emit_login_flow_failed(
+                    login_start.elapsed(),
+                    encryption,
+                    auth_method,
+                    error,
+                ),
+            }
+
+            result
+        }
+        .instrument(login_span)
+        .await?;
 
         observability::emit_connection_setup_completed(
             connect_start.elapsed(),
@@ -248,10 +277,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     ))]
     fn post_login_encryption(mut self, encryption: EncryptionLevel) -> Self {
         if let EncryptionLevel::Off = encryption {
-            event!(
-                Level::WARN,
-                "Turning TLS off after a login. All traffic from here on is not encrypted.",
-            );
+            observability::emit_tls_post_login_downgraded(encryption);
 
             let Self { transport, .. } = self;
             let tcp = transport.into_inner().into_inner();
@@ -821,8 +847,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
                 match client.next_bytes(Some(sspi_bytes.as_ref()))? {
                     Some(sspi_response) => {
-                        event!(Level::TRACE, sspi_response_len = sspi_response.len());
-
                         let id = self.context.next_packet_id();
                         let header = PacketHeader::login(id);
 
@@ -858,14 +882,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 let auth_bytes = self.flush_sspi().await?;
 
                 let next_token = match ctx.step(Some(auth_bytes.as_ref()), None)? {
-                    Some(response) => {
-                        event!(Level::TRACE, response_len = response.len());
-                        TokenSspi::new(Vec::from(response.deref()))
-                    }
-                    None => {
-                        event!(Level::TRACE, response_len = 0);
-                        TokenSspi::new(Vec::new())
-                    }
+                    Some(response) => TokenSspi::new(Vec::from(response.deref())),
+                    None => TokenSspi::new(Vec::new()),
                 };
 
                 let id = self.context.next_packet_id();
@@ -890,8 +908,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
                 match client.next_bytes(Some(sspi_bytes.as_ref()))? {
                     Some(sspi_response) => {
-                        event!(Level::TRACE, sspi_response_len = sspi_response.len());
-
                         let id = self.context.next_packet_id();
                         let header = PacketHeader::login(id);
 
@@ -936,38 +952,69 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         config: &Config,
         encryption: EncryptionLevel,
     ) -> crate::Result<Self> {
-        if encryption != EncryptionLevel::NotSupported {
-            event!(Level::INFO, "Performing a TLS handshake");
+        let tls_backend = observability::tls_backend_name();
+        let tls_span = observability::tls_negotiation_span(encryption, tls_backend);
+        let tls_start = Instant::now();
 
-            let Self {
-                transport, context, ..
-            } = self;
-            let mut stream = match transport.into_inner() {
-                MaybeTlsStream::Raw(tcp) => {
-                    create_tls_stream(config, TlsPreloginWrapper::new(tcp)).await?
+        async move {
+            observability::emit_tls_negotiation_start(encryption, tls_backend);
+
+            let result = async {
+                if encryption != EncryptionLevel::NotSupported {
+                    let Self {
+                        transport, context, ..
+                    } = self;
+                    let mut stream = match transport.into_inner() {
+                        MaybeTlsStream::Raw(tcp) => {
+                            create_tls_stream(config, TlsPreloginWrapper::new(tcp)).await?
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    stream.get_mut().handshake_complete();
+
+                    let transport = Framed::new(MaybeTlsStream::Tls(stream), PacketCodec);
+
+                    Ok((
+                        Self {
+                            transport,
+                            context,
+                            flushed: false,
+                            buf: BytesMut::new(),
+                        },
+                        true,
+                    ))
+                } else {
+                    Ok((self, false))
                 }
-                _ => unreachable!(),
-            };
+            }
+            .await;
 
-            stream.get_mut().handshake_complete();
-            event!(Level::INFO, "TLS handshake successful");
+            match result {
+                Ok((connection, tls_used)) => {
+                    observability::emit_tls_negotiation_completed(
+                        tls_start.elapsed(),
+                        encryption,
+                        tls_backend,
+                        tls_used,
+                    );
 
-            let transport = Framed::new(MaybeTlsStream::Tls(stream), PacketCodec);
+                    Ok(connection)
+                }
+                Err(error) => {
+                    observability::emit_tls_negotiation_failed(
+                        tls_start.elapsed(),
+                        encryption,
+                        tls_backend,
+                        &error,
+                    );
 
-            Ok(Self {
-                transport,
-                context,
-                flushed: false,
-                buf: BytesMut::new(),
-            })
-        } else {
-            event!(
-                Level::WARN,
-                "TLS encryption is not enabled. All traffic including the login credentials are not encrypted."
-            );
-
-            Ok(self)
+                    Err(error)
+                }
+            }
         }
+        .instrument(tls_span)
+        .await
     }
 
     /// Implements the TLS handshake with the SQL Server.
@@ -977,12 +1024,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         feature = "vendored-openssl"
     )))]
     async fn tls_handshake(self, _: &Config, _: EncryptionLevel) -> crate::Result<Self> {
-        event!(
-            Level::WARN,
-            "TLS encryption is not enabled. All traffic including the login credentials are not encrypted."
-        );
+        let tls_backend = observability::tls_backend_name();
+        let encryption = EncryptionLevel::NotSupported;
+        let tls_span = observability::tls_negotiation_span(encryption, tls_backend);
+        let tls_start = Instant::now();
 
-        Ok(self)
+        async move {
+            observability::emit_tls_negotiation_start(encryption, tls_backend);
+            observability::emit_tls_negotiation_completed(
+                tls_start.elapsed(),
+                encryption,
+                tls_backend,
+                false,
+            );
+
+            Ok(self)
+        }
+        .instrument(tls_span)
+        .await
     }
 
     pub(crate) async fn close(mut self) -> crate::Result<()> {
