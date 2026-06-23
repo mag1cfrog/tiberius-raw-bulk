@@ -8,6 +8,7 @@ use super::sspi::SspiClient;
 use crate::client::{tls::TlsPreloginWrapper, tls_stream::create_tls_stream};
 use crate::{
     client::{tls::MaybeTlsStream, AuthMethod, Config},
+    observability,
     tds::{
         codec::{
             self, Encode, LoginMessage, Packet, PacketCodec, PacketHeader, PacketStatus,
@@ -39,9 +40,9 @@ use libgssapi::{
 use pretty_hex::*;
 #[cfg(all(unix, feature = "integrated-auth-gssapi"))]
 use std::ops::Deref;
-use std::{cmp, fmt::Debug, io, pin::Pin, task};
+use std::{cmp, fmt::Debug, io, pin::Pin, task, time::Instant};
 use task::Poll;
-use tracing::{event, Level};
+use tracing::{event, Instrument, Level};
 
 /// A `Connection` is an abstraction between the [`Client`] and the server. It
 /// can be used as a `Stream` to fetch [`Packet`]s from and to `send` packets
@@ -155,6 +156,33 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     /// Creates a new connection
     pub(crate) async fn connect(config: Config, tcp_stream: S) -> crate::Result<Connection<S>> {
+        let requested_encryption = config.encryption;
+        let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
+        let span = observability::connection_connect_span(requested_encryption, fed_auth_required);
+
+        async move {
+            let connect_start = Instant::now();
+            observability::emit_connection_setup_start(requested_encryption, fed_auth_required);
+
+            let result =
+                Self::connect_inner(config, tcp_stream, fed_auth_required, connect_start).await;
+
+            if let Err(error) = &result {
+                observability::emit_connection_setup_failed(connect_start.elapsed(), error);
+            }
+
+            result
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn connect_inner(
+        config: Config,
+        tcp_stream: S,
+        fed_auth_required: bool,
+        connect_start: Instant,
+    ) -> crate::Result<Connection<S>> {
         let context = {
             let mut context = Context::new();
             context.set_spn(config.get_host(), config.get_port());
@@ -169,8 +197,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             flushed: false,
             buf: BytesMut::new(),
         };
-
-        let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
 
         let prelogin = connection
             .prelogin(config.encryption, fed_auth_required)
@@ -194,6 +220,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             .await?;
 
         connection.flush_done().await?;
+
+        observability::emit_connection_setup_completed(
+            connect_start.elapsed(),
+            encryption,
+            connection.context.packet_size(),
+        );
 
         Ok(connection)
     }
@@ -709,17 +741,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         encryption: EncryptionLevel,
         fed_auth_required: bool,
     ) -> crate::Result<PreloginMessage> {
-        let mut msg = PreloginMessage::new();
-        msg.encryption = encryption;
-        msg.fed_auth_required = fed_auth_required;
+        let prelogin_start = Instant::now();
+        observability::emit_prelogin_start(encryption, fed_auth_required);
 
-        let id = self.context.next_packet_id();
-        self.send(PacketHeader::pre_login(id), msg).await?;
+        let result = async {
+            let mut msg = PreloginMessage::new();
+            msg.encryption = encryption;
+            msg.fed_auth_required = fed_auth_required;
 
-        let response: PreloginMessage = codec::collect_from(self).await?;
-        // threadid (should be empty when sent from server to client)
-        debug_assert_eq!(response.thread_id, 0);
-        Ok(response)
+            let id = self.context.next_packet_id();
+            self.send(PacketHeader::pre_login(id), msg).await?;
+
+            let response: PreloginMessage = codec::collect_from(self).await?;
+            // threadid (should be empty when sent from server to client)
+            debug_assert_eq!(response.thread_id, 0);
+            Ok(response)
+        }
+        .await;
+
+        match &result {
+            Ok(response) => observability::emit_prelogin_completed(
+                prelogin_start.elapsed(),
+                response.encryption,
+                response.fed_auth_required,
+            ),
+            Err(error) => observability::emit_prelogin_failed(prelogin_start.elapsed(), error),
+        }
+
+        result
     }
 
     /// Defines the login record rules with SQL Server. Authentication with
