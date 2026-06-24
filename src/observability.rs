@@ -23,6 +23,7 @@ pub(crate) mod bulk_load;
 pub(crate) mod connection;
 pub(crate) mod login;
 pub(crate) mod tls;
+pub(crate) mod token;
 
 /// Stable tracing target constants.
 pub(crate) mod target {
@@ -130,6 +131,45 @@ pub(crate) mod event {
 
     /// Bulk-load flush failed.
     pub(crate) const BULK_LOAD_FLUSH_FAILED: &str = "protocol.bulk_load.flush.failed";
+
+    /// Column metadata token decoded.
+    pub(crate) const TOKEN_COL_METADATA: &str = "protocol.token.col_metadata";
+
+    /// Row token decoded.
+    pub(crate) const TOKEN_ROW: &str = "protocol.token.row";
+
+    /// NBC row token decoded.
+    pub(crate) const TOKEN_NBC_ROW: &str = "protocol.token.nbc_row";
+
+    /// Return value token decoded.
+    pub(crate) const TOKEN_RETURN_VALUE: &str = "protocol.token.return_value";
+
+    /// Return status token decoded.
+    pub(crate) const TOKEN_RETURN_STATUS: &str = "protocol.token.return_status";
+
+    /// Order token decoded.
+    pub(crate) const TOKEN_ORDER: &str = "protocol.token.order";
+
+    /// DONE-family token decoded.
+    pub(crate) const TOKEN_DONE: &str = "protocol.token.done";
+
+    /// Error token decoded.
+    pub(crate) const TOKEN_ERROR: &str = "protocol.token.error";
+
+    /// Info token decoded.
+    pub(crate) const TOKEN_INFO: &str = "protocol.token.info";
+
+    /// Environment change token decoded.
+    pub(crate) const TOKEN_ENV_CHANGE: &str = "protocol.token.env_change";
+
+    /// Login acknowledgement token decoded.
+    pub(crate) const TOKEN_LOGIN_ACK: &str = "protocol.token.login_ack";
+
+    /// Feature extension acknowledgement token decoded.
+    pub(crate) const TOKEN_FEATURE_EXT_ACK: &str = "protocol.token.feature_ext_ack";
+
+    /// SSPI token decoded.
+    pub(crate) const TOKEN_SSPI: &str = "protocol.token.sspi";
 
     /// Smoke event used to validate the observability contract helper.
     pub(crate) const SMOKE: &str = "protocol.smoke";
