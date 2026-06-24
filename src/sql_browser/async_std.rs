@@ -1,4 +1,5 @@
 use super::SqlBrowser;
+use crate::observability;
 use async_std::{
     io,
     net::{self, ToSocketAddrs},
@@ -6,7 +7,6 @@ use async_std::{
 use async_trait::async_trait;
 use futures_util::future::TryFutureExt;
 use std::time;
-use tracing::Level;
 
 #[async_trait]
 impl SqlBrowser for net::TcpStream {
@@ -27,12 +27,13 @@ impl SqlBrowser for net::TcpStream {
                 } else {
                     "[::]:0".parse().unwrap()
                 };
+                let address_family = if addr.is_ipv4() { "ipv4" } else { "ipv6" };
+                let sql_browser_port = builder.get_port();
 
-                tracing::event!(
-                    Level::TRACE,
-                    "Connecting to instance `{}` using SQL Browser in port `{}`",
-                    instance_name,
-                    builder.get_port()
+                observability::sql_browser::emit_resolution_start(
+                    "async_std",
+                    address_family,
+                    sql_browser_port,
                 );
 
                 let msg = [&[4u8], instance_name.as_bytes()].concat();
@@ -45,19 +46,44 @@ impl SqlBrowser for net::TcpStream {
 
                 let len = io::timeout(timeout, socket.recv(&mut buf))
                     .map_err(|_| {
+                        observability::sql_browser::emit_resolution_timeout(
+                            "async_std",
+                            address_family,
+                            sql_browser_port,
+                            timeout,
+                        );
+
                         crate::error::Error::Conversion(
                             format!(
                                 "SQL browser timeout during resolving instance {}. Please check if browser is running in port {} and does the instance exist.",
                                 instance_name,
-                                builder.get_port(),
+                                sql_browser_port,
                             )
                             .into(),
                         )
                     })
                     .await?;
 
-                let port = super::get_port_from_sql_browser_reply(buf, len, instance_name)?;
-                tracing::event!(Level::TRACE, "Found port `{}` from SQL Browser", port);
+                let port = match super::get_port_from_sql_browser_reply(buf, len, instance_name) {
+                    Ok(port) => {
+                        observability::sql_browser::emit_resolution_completed(
+                            "async_std",
+                            address_family,
+                            sql_browser_port,
+                            port,
+                        );
+                        port
+                    }
+                    Err(error) => {
+                        observability::sql_browser::emit_resolution_failed(
+                            "async_std",
+                            address_family,
+                            sql_browser_port,
+                            &error,
+                        );
+                        return Err(error);
+                    }
+                };
                 addr.set_port(port);
             };
 
