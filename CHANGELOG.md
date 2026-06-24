@@ -1,5 +1,26 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.14
+
+- Add a stable, sanitized protocol tracing contract for client and TDS
+  observability.
+- Add scoped tracing capture support for deterministic observability tests.
+- Normalize connection setup and prelogin lifecycle spans and events.
+- Normalize TLS negotiation and login/authentication tracing.
+- Normalize bulk-load request lifecycle, packet write, and flush summary
+  tracing.
+- Add sanitized server token telemetry for DONE, ERROR, INFO, ENVCHANGE,
+  LOGINACK, FEATUREEXTACK, row, return value, and SSPI token paths.
+- Add sanitized SQL Browser named-instance resolution telemetry.
+- Remove or replace unsafe tracing output that could expose server message
+  text, token payloads, packet bytes, certificate bytes, instance names, host
+  names, or socket addresses.
+- Move observability helpers into dedicated submodules.
+- Document subscriber ownership, stable span/event names, structured field
+  conventions, feature-gated telemetry details, and forbidden telemetry.
+- Improve CI cache warming for Linux apt dependencies and Windows OpenSSL
+  setup.
+
 ## Version 0.12.3-raw-bulk.13
 
 - Complete the dependency audit follow-up work.
