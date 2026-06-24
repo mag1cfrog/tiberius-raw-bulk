@@ -54,8 +54,29 @@ impl TokenDone {
         self.status.is_empty()
     }
 
+    pub(crate) fn status_contains(&self, status: DoneStatus) -> bool {
+        self.status.contains(status)
+    }
+
+    pub(crate) fn row_count(&self) -> Option<u64> {
+        if self.status_contains(DoneStatus::Count) {
+            Some(self.done_rows)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn rows(&self) -> u64 {
         self.done_rows
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(status: BitFlags<DoneStatus>, done_rows: u64) -> Self {
+        Self {
+            status,
+            cur_cmd: 0,
+            done_rows,
+        }
     }
 }
 

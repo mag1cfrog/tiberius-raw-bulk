@@ -1,6 +1,7 @@
 use crate::tds::codec::TokenSspi;
 use crate::{
     client::Connection,
+    observability,
     tds::codec::{
         TokenColMetaData, TokenDone, TokenEnvChange, TokenError, TokenFeatureExtAck, TokenInfo,
         TokenLoginAck, TokenOrder, TokenReturnValue, TokenRow,
@@ -12,7 +13,6 @@ use futures_util::{
     stream::{BoxStream, TryStreamExt},
 };
 use std::{convert::TryFrom, sync::Arc};
-use tracing::{event, Level};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -99,6 +99,7 @@ where
 
     async fn get_col_metadata(&mut self) -> crate::Result<ReceivedToken> {
         let meta = Arc::new(TokenColMetaData::decode(self.conn).await?);
+        observability::token::emit_col_metadata(meta.columns.len());
         self.conn.context_mut().set_last_meta(meta.clone());
 
         Ok(ReceivedToken::NewResultset(meta))
@@ -106,28 +107,33 @@ where
 
     async fn get_row(&mut self) -> crate::Result<ReceivedToken> {
         let return_value = TokenRow::decode(self.conn).await?;
+        observability::token::emit_row(return_value.len());
 
         Ok(ReceivedToken::Row(return_value))
     }
 
     async fn get_nbc_row(&mut self) -> crate::Result<ReceivedToken> {
         let return_value = TokenRow::decode_nbc(self.conn).await?;
+        observability::token::emit_nbc_row(return_value.len());
 
         Ok(ReceivedToken::Row(return_value))
     }
 
     async fn get_return_value(&mut self) -> crate::Result<ReceivedToken> {
         let return_value = TokenReturnValue::decode(self.conn).await?;
+        observability::token::emit_return_value(return_value.udf);
         Ok(ReceivedToken::ReturnValue(return_value))
     }
 
     async fn get_return_status(&mut self) -> crate::Result<ReceivedToken> {
         let status = self.conn.read_u32_le().await?;
+        observability::token::emit_return_status();
         Ok(ReceivedToken::ReturnStatus(status))
     }
 
     async fn get_error(&mut self) -> crate::Result<ReceivedToken> {
         let err = TokenError::decode(self.conn).await?;
+        observability::token::emit_error(&err);
 
         if self.last_error.is_none() {
             self.last_error = Some(Error::Server(err.clone()));
@@ -138,24 +144,25 @@ where
 
     async fn get_order(&mut self) -> crate::Result<ReceivedToken> {
         let order = TokenOrder::decode(self.conn).await?;
+        observability::token::emit_order(order.column_indexes.len());
         Ok(ReceivedToken::Order(order))
     }
 
     async fn get_done_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
-        event!(Level::TRACE, "{}", done);
+        observability::token::emit_done(observability::token::DoneKind::Done, &done);
         Ok(ReceivedToken::Done(done))
     }
 
     async fn get_done_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
-        event!(Level::TRACE, "{}", done);
+        observability::token::emit_done(observability::token::DoneKind::DoneProc, &done);
         Ok(ReceivedToken::DoneProc(done))
     }
 
     async fn get_done_in_proc_value(&mut self) -> crate::Result<ReceivedToken> {
         let done = TokenDone::decode(self.conn).await?;
-        event!(Level::TRACE, "{}", done);
+        observability::token::emit_done(observability::token::DoneKind::DoneInProc, &done);
         Ok(ReceivedToken::DoneInProc(done))
     }
 
@@ -177,32 +184,32 @@ where
             _ => (),
         }
 
+        observability::token::emit_env_change(&change);
+
         Ok(ReceivedToken::EnvChange(change))
     }
 
     async fn get_info(&mut self) -> crate::Result<ReceivedToken> {
         let info = TokenInfo::decode(self.conn).await?;
+        observability::token::emit_info(&info);
         Ok(ReceivedToken::Info(info))
     }
 
     async fn get_login_ack(&mut self) -> crate::Result<ReceivedToken> {
         let ack = TokenLoginAck::decode(self.conn).await?;
+        observability::token::emit_login_ack(&ack);
         Ok(ReceivedToken::LoginAck(ack))
     }
 
     async fn get_feature_ext_ack(&mut self) -> crate::Result<ReceivedToken> {
         let ack = TokenFeatureExtAck::decode(self.conn).await?;
-        event!(
-            Level::INFO,
-            "FeatureExtAck with {} features",
-            ack.features.len()
-        );
+        observability::token::emit_feature_ext_ack(&ack);
         Ok(ReceivedToken::FeatureExtAck(ack))
     }
 
     async fn get_sspi(&mut self) -> crate::Result<ReceivedToken> {
         let sspi = TokenSspi::decode_async(self.conn).await?;
-        event!(Level::TRACE, "SSPI response");
+        observability::token::emit_sspi();
         Ok(ReceivedToken::Sspi(sspi))
     }
 
