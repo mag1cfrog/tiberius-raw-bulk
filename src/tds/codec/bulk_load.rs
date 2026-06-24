@@ -3,14 +3,14 @@ use bytes::BufMut;
 use enumflags2::BitFlags;
 use futures_util::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "bulk-load-profile")]
-use std::time::{Duration, Instant};
-use tracing::{event, Level};
+use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(feature = "bulk-load-profile")]
 use crate::client::{DirectPacketPollWriteSummary, DirectPacketWriteTiming};
 use crate::{
-    client::Connection, sql_read_bytes::SqlReadBytes, BytesMutWithDataColumns, ColumnFlag,
-    ColumnType, ExecuteResult,
+    client::Connection, observability, sql_read_bytes::SqlReadBytes, BytesMutWithDataColumns,
+    ColumnFlag, ColumnType, ExecuteResult,
 };
 
 use super::{
@@ -573,6 +573,7 @@ where
     packet_id: u8,
     buf: BytesMut,
     columns: Vec<MetaDataColumn<'a>>,
+    trace: observability::bulk_load::RequestTrace,
     #[cfg(feature = "bulk-load-profile")]
     packet_stats: BulkLoadPacketStats,
     #[cfg(feature = "bulk-load-profile")]
@@ -625,6 +626,9 @@ where
         columns: Vec<MetaDataColumn<'a>>,
     ) -> crate::Result<Self> {
         let packet_id = connection.context_mut().next_packet_id();
+        let packet_payload_limit = packet_payload_limit(connection);
+        let column_count = usize_to_u64_saturating(columns.len());
+        let trace = observability::bulk_load::RequestTrace::new(column_count, packet_payload_limit);
         let mut buf = BytesMut::new();
 
         let cmd = TokenColMetaData {
@@ -638,6 +642,7 @@ where
             packet_id,
             buf,
             columns,
+            trace,
             #[cfg(feature = "bulk-load-profile")]
             packet_stats: BulkLoadPacketStats::default(),
             #[cfg(feature = "bulk-load-profile")]
@@ -699,6 +704,7 @@ where
         if !self.direct_packet_writes {
             replace_with_direct_packet_buffer(&mut self.buf);
             self.direct_packet_writes = true;
+            self.trace.set_direct_packet_writes(true);
         }
     }
 
@@ -739,6 +745,7 @@ where
 
         row.encode(&mut buf_with_columns)?;
         self.write_packets().await?;
+        self.trace.record_known_rows(1);
 
         Ok(())
     }
@@ -758,6 +765,7 @@ where
     pub async fn send_raw_row_payload(&mut self, payload: impl AsRef<[u8]>) -> crate::Result<()> {
         append_raw_row_payload(&mut self.buf, payload.as_ref())?;
         self.write_packets().await?;
+        self.trace.record_known_rows(1);
 
         Ok(())
     }
@@ -780,6 +788,7 @@ where
     pub async fn send_raw_rows_payload(&mut self, payload: impl AsRef<[u8]>) -> crate::Result<()> {
         append_raw_rows_payload(&mut self.buf, payload.as_ref())?;
         self.write_packets().await?;
+        self.trace.mark_row_count_unknown();
 
         Ok(())
     }
@@ -802,12 +811,11 @@ where
         payload: impl AsRef<[u8]>,
         row_token_offsets: impl AsRef<[usize]>,
     ) -> crate::Result<()> {
-        append_raw_rows_payload_checked(
-            &mut self.buf,
-            payload.as_ref(),
-            row_token_offsets.as_ref(),
-        )?;
+        let row_token_offsets = row_token_offsets.as_ref();
+        append_raw_rows_payload_checked(&mut self.buf, payload.as_ref(), row_token_offsets)?;
         self.write_packets().await?;
+        self.trace
+            .record_known_rows(usize_to_u64_saturating(row_token_offsets.len()));
 
         Ok(())
     }
@@ -830,8 +838,9 @@ where
     where
         F: FnOnce(&mut RawRowsAppendBuffer<'_>) -> crate::Result<RawRowsAppend>,
     {
-        append_raw_rows_with(&mut self.buf, encode)?;
+        let row_count = append_raw_rows_with(&mut self.buf, encode)?;
         self.write_packets().await?;
+        self.trace.record_known_rows(row_count);
 
         Ok(())
     }
@@ -854,37 +863,58 @@ where
     /// table.
     #[cfg(not(feature = "bulk-load-profile"))]
     pub async fn finalize(mut self) -> crate::Result<ExecuteResult> {
-        TokenDone::default().encode(&mut self.buf)?;
-        self.write_packets().await?;
+        let request_start = Instant::now();
+        let result = async {
+            TokenDone::default().encode(&mut self.buf)?;
+            self.write_packets().await?;
 
-        let data = self.buf.split();
-        let data_len = if self.direct_packet_writes {
-            data.len().saturating_sub(HEADER_BYTES)
-        } else {
-            data.len()
-        };
+            let data = self.buf.split();
+            let data_len = if self.direct_packet_writes {
+                data.len().saturating_sub(HEADER_BYTES)
+            } else {
+                data.len()
+            };
 
-        event!(
-            Level::TRACE,
-            "Finalizing a bulk insert ({} bytes)",
-            data_len + HEADER_BYTES,
-        );
+            if self.direct_packet_writes {
+                let mut data = data;
+                let mut header = PacketHeader::bulk_load(self.packet_id);
+                header.set_status(PacketStatus::EndOfMessage);
+                let mut header_buf = &mut data[..HEADER_BYTES];
+                header.encode_for_payload(data_len, &mut header_buf)?;
+                self.connection.write_direct_packet_buffer(&data).await?;
+            } else {
+                let mut header = PacketHeader::bulk_load(self.packet_id);
+                header.set_status(PacketStatus::EndOfMessage);
+                self.connection.write_to_wire(header, data).await?;
+            }
 
-        if self.direct_packet_writes {
-            let mut data = data;
-            let mut header = PacketHeader::bulk_load(self.packet_id);
-            header.set_status(PacketStatus::EndOfMessage);
-            let mut header_buf = &mut data[..HEADER_BYTES];
-            header.encode_for_payload(data_len, &mut header_buf)?;
-            self.connection.write_direct_packet_buffer(&data).await?;
-        } else {
-            let mut header = PacketHeader::bulk_load(self.packet_id);
-            header.set_status(PacketStatus::EndOfMessage);
-            self.connection.write_to_wire(header, data).await?;
+            self.trace.record_packet_written(
+                usize_to_u64_saturating(data_len),
+                usize_to_u64_saturating(HEADER_BYTES),
+                true,
+            );
+
+            let flush_start = Instant::now();
+            let flush_result = self.connection.flush_sink().await;
+            let flush_elapsed = flush_start.elapsed();
+            match &flush_result {
+                Ok(_) => self.trace.emit_flush_completed(flush_elapsed),
+                Err(error) => self.trace.emit_flush_failed(flush_elapsed, error),
+            }
+            flush_result?;
+
+            ExecuteResult::new(self.connection).await
+        }
+        .await;
+
+        match &result {
+            Ok(_) => self.trace.emit_request_completed(request_start.elapsed()),
+            Err(error) => self
+                .trace
+                .emit_request_failed(request_start.elapsed(), error),
         }
 
-        self.connection.flush_sink().await?;
-        ExecuteResult::new(self.connection).await
+        result
     }
 
     /// Ends the bulk load and returns packet statistics collected by the request.
@@ -912,88 +942,108 @@ where
     #[cfg(feature = "bulk-load-profile")]
     pub async fn finalize_with_stats(mut self) -> crate::Result<(ExecuteResult, BulkLoadStats)> {
         let finalize_start = Instant::now();
-        TokenDone::default().encode(&mut self.buf)?;
-        self.write_packets().await?;
+        let result = async {
+            TokenDone::default().encode(&mut self.buf)?;
+            self.write_packets().await?;
 
-        let data = self.buf.split();
-        let data_len = if self.direct_packet_writes {
-            data.len().saturating_sub(HEADER_BYTES)
-        } else {
-            data.len()
-        };
-        self.packet_stats.record_finalized_packet(data_len);
+            let data = self.buf.split();
+            let data_len = if self.direct_packet_writes {
+                data.len().saturating_sub(HEADER_BYTES)
+            } else {
+                data.len()
+            };
+            self.packet_stats.record_finalized_packet(data_len);
 
-        event!(
-            Level::TRACE,
-            "Finalizing a bulk insert ({} bytes)",
-            data_len + HEADER_BYTES,
-        );
-
-        let write_start = Instant::now();
-        if self.direct_packet_writes {
-            let mut data = data;
-            let mut header = PacketHeader::bulk_load(self.packet_id);
-            header.set_status(PacketStatus::EndOfMessage);
-            let mut header_buf = &mut data[..HEADER_BYTES];
-            header.encode_for_payload(data_len, &mut header_buf)?;
-            let write_result = self
-                .connection
-                .write_direct_packet_buffer_with_timing(&data)
-                .await;
-            let write_elapsed = write_start.elapsed();
-            self.write_timing_stats
-                .record_write_to_wire(write_elapsed, data_len);
-            match write_result {
-                Ok(direct_timing) => {
-                    self.write_timing_stats
-                        .record_direct_final_packet_write(direct_timing);
-                    self.write_timing_stats
-                        .record_finalize_write_to_wire_elapsed(write_elapsed);
+            let write_start = Instant::now();
+            if self.direct_packet_writes {
+                let mut data = data;
+                let mut header = PacketHeader::bulk_load(self.packet_id);
+                header.set_status(PacketStatus::EndOfMessage);
+                let mut header_buf = &mut data[..HEADER_BYTES];
+                header.encode_for_payload(data_len, &mut header_buf)?;
+                let write_result = self
+                    .connection
+                    .write_direct_packet_buffer_with_timing(&data)
+                    .await;
+                let write_elapsed = write_start.elapsed();
+                self.write_timing_stats
+                    .record_write_to_wire(write_elapsed, data_len);
+                match write_result {
+                    Ok(direct_timing) => {
+                        self.write_timing_stats
+                            .record_direct_final_packet_write(direct_timing);
+                        self.write_timing_stats
+                            .record_finalize_write_to_wire_elapsed(write_elapsed);
+                    }
+                    Err(err) => return Err(err),
                 }
-                Err(err) => return Err(err),
+            } else {
+                let mut header = PacketHeader::bulk_load(self.packet_id);
+                header.set_status(PacketStatus::EndOfMessage);
+                let write_result = self
+                    .connection
+                    .write_to_wire_with_timing(header, data)
+                    .await;
+                let write_elapsed = write_start.elapsed();
+                self.write_timing_stats
+                    .record_write_to_wire(write_elapsed, data_len);
+                match write_result {
+                    Ok(connection_timing) => {
+                        self.write_timing_stats.record_connection_write(
+                            data_len,
+                            connection_timing.ready_elapsed,
+                            connection_timing.encode_elapsed,
+                            connection_timing.flush_elapsed,
+                        );
+                        self.write_timing_stats
+                            .record_finalize_write_to_wire_elapsed(write_elapsed);
+                    }
+                    Err(err) => return Err(err),
+                }
             }
-        } else {
-            let mut header = PacketHeader::bulk_load(self.packet_id);
-            header.set_status(PacketStatus::EndOfMessage);
-            let write_result = self
-                .connection
-                .write_to_wire_with_timing(header, data)
-                .await;
-            let write_elapsed = write_start.elapsed();
+
+            self.trace.record_packet_written(
+                usize_to_u64_saturating(data_len),
+                usize_to_u64_saturating(HEADER_BYTES),
+                true,
+            );
+
+            let flush_start = Instant::now();
+            let flush_result = self.connection.flush_sink().await;
+            let flush_elapsed = flush_start.elapsed();
+            self.write_timing_stats.record_flush(flush_elapsed);
             self.write_timing_stats
-                .record_write_to_wire(write_elapsed, data_len);
-            match write_result {
-                Ok(connection_timing) => {
-                    self.write_timing_stats.record_connection_write(
-                        data_len,
-                        connection_timing.ready_elapsed,
-                        connection_timing.encode_elapsed,
-                        connection_timing.flush_elapsed,
-                    );
-                    self.write_timing_stats
-                        .record_finalize_write_to_wire_elapsed(write_elapsed);
-                }
-                Err(err) => return Err(err),
+                .record_finalize_flush_elapsed(flush_elapsed);
+            match &flush_result {
+                Ok(_) => self.trace.emit_flush_completed(flush_elapsed),
+                Err(error) => self.trace.emit_flush_failed(flush_elapsed, error),
+            }
+            flush_result?;
+
+            let result_start = Instant::now();
+            let result = ExecuteResult::new(self.connection).await?;
+            self.write_timing_stats
+                .record_finalize_result_elapsed(result_start.elapsed());
+
+            Ok(result)
+        }
+        .await;
+
+        match result {
+            Ok(result) => {
+                self.write_timing_stats
+                    .record_finalize_elapsed(finalize_start.elapsed());
+                self.trace.emit_request_completed(finalize_start.elapsed());
+                let stats = self.stats();
+
+                Ok((result, stats))
+            }
+            Err(error) => {
+                self.trace
+                    .emit_request_failed(finalize_start.elapsed(), &error);
+                Err(error)
             }
         }
-
-        let flush_start = Instant::now();
-        let flush_result = self.connection.flush_sink().await;
-        let flush_elapsed = flush_start.elapsed();
-        self.write_timing_stats.record_flush(flush_elapsed);
-        self.write_timing_stats
-            .record_finalize_flush_elapsed(flush_elapsed);
-        flush_result?;
-
-        let result_start = Instant::now();
-        let result = ExecuteResult::new(self.connection).await?;
-        self.write_timing_stats
-            .record_finalize_result_elapsed(result_start.elapsed());
-        self.write_timing_stats
-            .record_finalize_elapsed(finalize_start.elapsed());
-        let stats = self.stats();
-
-        Ok((result, stats))
     }
 
     async fn write_packets(&mut self) -> crate::Result<()> {
@@ -1022,24 +1072,20 @@ where
 
     async fn write_packets_framed_inner(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
+        self.trace
+            .record_write_packets_call(usize_to_u64_saturating(self.buf.len()));
         #[cfg(feature = "bulk-load-profile")]
         self.packet_stats.record_write_packets_call(self.buf.len());
 
         while self.buf.len() > packet_size {
             let header = PacketHeader::bulk_load(self.packet_id);
             let data = self.buf.split_to(packet_size);
+            let data_len = data.len();
             #[cfg(feature = "bulk-load-profile")]
-            self.packet_stats.record_packet_written(data.len());
-
-            event!(
-                Level::TRACE,
-                "Bulk insert packet ({} bytes)",
-                data.len() + HEADER_BYTES,
-            );
+            self.packet_stats.record_packet_written(data_len);
 
             #[cfg(feature = "bulk-load-profile")]
             {
-                let data_len = data.len();
                 let write_start = Instant::now();
                 let write_result = self
                     .connection
@@ -1061,8 +1107,16 @@ where
             }
             #[cfg(not(feature = "bulk-load-profile"))]
             self.connection.write_to_wire(header, data).await?;
+
+            self.trace.record_packet_written(
+                usize_to_u64_saturating(data_len),
+                usize_to_u64_saturating(HEADER_BYTES),
+                false,
+            );
         }
 
+        self.trace
+            .record_buffered_bytes_after_write(usize_to_u64_saturating(self.buf.len()));
         #[cfg(feature = "bulk-load-profile")]
         self.packet_stats
             .record_buffered_bytes_after_write(self.buf.len());
@@ -1072,6 +1126,8 @@ where
 
     async fn write_packets_direct_inner(&mut self) -> crate::Result<()> {
         let packet_size = (self.connection.context().packet_size() as usize) - HEADER_BYTES;
+        self.trace
+            .record_write_packets_call(usize_to_u64_saturating(self.direct_payload_len()));
         #[cfg(feature = "bulk-load-profile")]
         self.packet_stats
             .record_write_packets_call(self.direct_payload_len());
@@ -1096,12 +1152,6 @@ where
             #[cfg(feature = "bulk-load-profile")]
             self.packet_stats.record_packet_written(packet_size);
 
-            event!(
-                Level::TRACE,
-                "Bulk insert direct packet ({} bytes)",
-                packet_size + HEADER_BYTES,
-            );
-
             #[cfg(feature = "bulk-load-profile")]
             {
                 let write_start = Instant::now();
@@ -1123,6 +1173,11 @@ where
                 .write_direct_packet_buffer(&self.buf[header_start..packet_end])
                 .await?;
 
+            self.trace.record_packet_written(
+                usize_to_u64_saturating(packet_size),
+                usize_to_u64_saturating(HEADER_BYTES),
+                false,
+            );
             sent_packets = true;
             payload_start += packet_size;
             payload_remaining -= packet_size;
@@ -1139,6 +1194,8 @@ where
             replace_with_direct_packet_buffer(&mut self.buf);
         }
 
+        self.trace
+            .record_buffered_bytes_after_write(usize_to_u64_saturating(self.direct_payload_len()));
         #[cfg(feature = "bulk-load-profile")]
         self.packet_stats
             .record_buffered_bytes_after_write(self.direct_payload_len());
@@ -1209,7 +1266,7 @@ fn append_raw_rows_payload_checked(
 /// If encoding or validation fails, this helper truncates `buf` back to the
 /// original length so the request can continue to behave as if the attempted
 /// append never happened.
-fn append_raw_rows_with<F>(buf: &mut BytesMut, encode: F) -> crate::Result<()>
+fn append_raw_rows_with<F>(buf: &mut BytesMut, encode: F) -> crate::Result<u64>
 where
     F: FnOnce(&mut RawRowsAppendBuffer<'_>) -> crate::Result<RawRowsAppend>,
 {
@@ -1235,12 +1292,20 @@ where
         return Err(err);
     }
 
-    Ok(())
+    Ok(usize_to_u64_saturating(append.row_token_offsets().len()))
 }
 
-#[cfg(feature = "bulk-load-profile")]
 fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn packet_payload_limit<S>(connection: &Connection<S>) -> u64
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    usize_to_u64_saturating(
+        (connection.context().packet_size() as usize).saturating_sub(HEADER_BYTES),
+    )
 }
 
 fn validate_raw_row_token_offsets(

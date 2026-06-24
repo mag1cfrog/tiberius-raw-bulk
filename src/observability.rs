@@ -20,6 +20,8 @@ use crate::{client::AuthMethod, EncryptionLevel, Error};
 use std::time::Duration;
 use tracing::{Level, Span};
 
+pub(crate) mod bulk_load;
+
 /// Stable tracing target constants.
 pub(crate) mod target {
     /// Crate-owned target for stable TDS protocol telemetry.
@@ -42,6 +44,9 @@ pub(crate) mod span {
 
     /// Login and authentication flow span.
     pub(crate) const LOGIN_FLOW: &str = "protocol.login.flow";
+
+    /// Bulk-load request span.
+    pub(crate) const BULK_LOAD_REQUEST: &str = "protocol.bulk_load.request";
 
     /// Smoke span used to validate the observability contract helper.
     pub(crate) const SMOKE: &str = "protocol.smoke";
@@ -102,6 +107,27 @@ pub(crate) mod event {
 
     /// Login flow failed.
     pub(crate) const LOGIN_FLOW_FAILED: &str = "protocol.login.flow.failed";
+
+    /// Bulk-load request span marker event.
+    pub(crate) const BULK_LOAD_REQUEST: &str = "protocol.bulk_load.request";
+
+    /// Bulk-load request started.
+    pub(crate) const BULK_LOAD_REQUEST_START: &str = "protocol.bulk_load.request.start";
+
+    /// Bulk-load request completed.
+    pub(crate) const BULK_LOAD_REQUEST_COMPLETED: &str = "protocol.bulk_load.request.completed";
+
+    /// Bulk-load request failed.
+    pub(crate) const BULK_LOAD_REQUEST_FAILED: &str = "protocol.bulk_load.request.failed";
+
+    /// Bulk-load packet write summary.
+    pub(crate) const BULK_LOAD_PACKET_WRITTEN: &str = "protocol.bulk_load.packet.written";
+
+    /// Bulk-load flush completed.
+    pub(crate) const BULK_LOAD_FLUSH_COMPLETED: &str = "protocol.bulk_load.flush.completed";
+
+    /// Bulk-load flush failed.
+    pub(crate) const BULK_LOAD_FLUSH_FAILED: &str = "protocol.bulk_load.flush.failed";
 
     /// Smoke event used to validate the observability contract helper.
     pub(crate) const SMOKE: &str = "protocol.smoke";
