@@ -41,6 +41,33 @@
 //! feature. When enabled, the crate exposes packet counters and write timing
 //! breakdowns for bulk-load requests.
 //!
+//! # Protocol observability
+//!
+//! This crate emits stable, sanitized `tracing` spans and events for client and
+//! protocol activity, but it never installs a subscriber. Applications, tests,
+//! and downstream crates own subscriber installation and exporter wiring.
+//!
+//! Protocol telemetry uses the target `tiberius_raw_bulk::protocol`. Stable
+//! events include a structured `telemetry_event` field. Stable spans and events
+//! use dotted names, and structured fields use snake_case. Count fields end in
+//! `_count`, byte fields end in `_bytes`, and elapsed duration fields end in
+//! `_elapsed_ms`.
+//!
+//! The stable span surface currently includes connection setup, TLS
+//! negotiation, login/authentication, and bulk-load request spans. The stable
+//! event surface covers connection/prelogin, TLS/login, bulk-load lifecycle and
+//! packet summaries, server token metadata, and SQL Browser named-instance
+//! resolution when a SQL Browser feature is enabled.
+//!
+//! The default safety policy forbids connection strings, credentials, access
+//! tokens, raw SQL text, parameter values, row values, return value payloads,
+//! raw packet bytes, SQL Browser request/reply bytes, certificate bytes, raw
+//! token debug output, arbitrary server-returned ERROR/INFO message text,
+//! ENVCHANGE string values, SQL Browser instance names, host names, and full
+//! socket addresses. Downstream collectors and tests should assert on
+//! structured fields such as `target`, `telemetry_event`, `phase`, `operation`,
+//! `status`, and safe protocol metadata rather than formatted messages.
+//!
 //! # Connecting with async-std
 //!
 //! Being not bound to any single runtime, a `TcpStream` must be created
