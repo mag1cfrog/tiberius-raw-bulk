@@ -158,17 +158,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     pub(crate) async fn connect(config: Config, tcp_stream: S) -> crate::Result<Connection<S>> {
         let requested_encryption = config.encryption;
         let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
-        let span = observability::connection_connect_span(requested_encryption, fed_auth_required);
+        let span = observability::connection::connect_span(requested_encryption, fed_auth_required);
 
         async move {
             let connect_start = Instant::now();
-            observability::emit_connection_setup_start(requested_encryption, fed_auth_required);
+            observability::connection::emit_setup_start(requested_encryption, fed_auth_required);
 
             let result =
                 Self::connect_inner(config, tcp_stream, fed_auth_required, connect_start).await;
 
             if let Err(error) = &result {
-                observability::emit_connection_setup_failed(connect_start.elapsed(), error);
+                observability::connection::emit_setup_failed(connect_start.elapsed(), error);
             }
 
             result
@@ -206,11 +206,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
         let connection = connection.tls_handshake(&config, encryption).await?;
 
-        let auth_method = observability::auth_method_category(&config.auth);
-        let login_span = observability::login_flow_span(encryption, auth_method);
+        let auth_method = observability::login::auth_method_category(&config.auth);
+        let login_span = observability::login::flow_span(encryption, auth_method);
         let login_start = Instant::now();
         let connection = async move {
-            observability::emit_login_flow_start(encryption, auth_method);
+            observability::login::emit_flow_start(encryption, auth_method);
 
             let result = async {
                 let mut connection = connection
@@ -232,12 +232,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             .await;
 
             match &result {
-                Ok(_) => observability::emit_login_flow_completed(
+                Ok(_) => observability::login::emit_flow_completed(
                     login_start.elapsed(),
                     encryption,
                     auth_method,
                 ),
-                Err(error) => observability::emit_login_flow_failed(
+                Err(error) => observability::login::emit_flow_failed(
                     login_start.elapsed(),
                     encryption,
                     auth_method,
@@ -250,7 +250,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         .instrument(login_span)
         .await?;
 
-        observability::emit_connection_setup_completed(
+        observability::connection::emit_setup_completed(
             connect_start.elapsed(),
             encryption,
             connection.context.packet_size(),
@@ -277,7 +277,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     ))]
     fn post_login_encryption(mut self, encryption: EncryptionLevel) -> Self {
         if let EncryptionLevel::Off = encryption {
-            observability::emit_tls_post_login_downgraded(encryption);
+            observability::tls::emit_post_login_downgraded(encryption);
 
             let Self { transport, .. } = self;
             let tcp = transport.into_inner().into_inner();
@@ -768,7 +768,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         fed_auth_required: bool,
     ) -> crate::Result<PreloginMessage> {
         let prelogin_start = Instant::now();
-        observability::emit_prelogin_start(encryption, fed_auth_required);
+        observability::connection::emit_prelogin_start(encryption, fed_auth_required);
 
         let result = async {
             let mut msg = PreloginMessage::new();
@@ -786,12 +786,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         .await;
 
         match &result {
-            Ok(response) => observability::emit_prelogin_completed(
+            Ok(response) => observability::connection::emit_prelogin_completed(
                 prelogin_start.elapsed(),
                 response.encryption,
                 response.fed_auth_required,
             ),
-            Err(error) => observability::emit_prelogin_failed(prelogin_start.elapsed(), error),
+            Err(error) => {
+                observability::connection::emit_prelogin_failed(prelogin_start.elapsed(), error)
+            }
         }
 
         result
@@ -952,12 +954,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         config: &Config,
         encryption: EncryptionLevel,
     ) -> crate::Result<Self> {
-        let tls_backend = observability::tls_backend_name();
-        let tls_span = observability::tls_negotiation_span(encryption, tls_backend);
+        let tls_backend = observability::tls::backend_name();
+        let tls_span = observability::tls::negotiation_span(encryption, tls_backend);
         let tls_start = Instant::now();
 
         async move {
-            observability::emit_tls_negotiation_start(encryption, tls_backend);
+            observability::tls::emit_negotiation_start(encryption, tls_backend);
 
             let result = async {
                 if encryption != EncryptionLevel::NotSupported {
@@ -992,7 +994,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
 
             match result {
                 Ok((connection, tls_used)) => {
-                    observability::emit_tls_negotiation_completed(
+                    observability::tls::emit_negotiation_completed(
                         tls_start.elapsed(),
                         encryption,
                         tls_backend,
@@ -1002,7 +1004,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                     Ok(connection)
                 }
                 Err(error) => {
-                    observability::emit_tls_negotiation_failed(
+                    observability::tls::emit_negotiation_failed(
                         tls_start.elapsed(),
                         encryption,
                         tls_backend,
@@ -1024,14 +1026,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         feature = "vendored-openssl"
     )))]
     async fn tls_handshake(self, _: &Config, _: EncryptionLevel) -> crate::Result<Self> {
-        let tls_backend = observability::tls_backend_name();
+        let tls_backend = observability::tls::backend_name();
         let encryption = EncryptionLevel::NotSupported;
-        let tls_span = observability::tls_negotiation_span(encryption, tls_backend);
+        let tls_span = observability::tls::negotiation_span(encryption, tls_backend);
         let tls_start = Instant::now();
 
         async move {
-            observability::emit_tls_negotiation_start(encryption, tls_backend);
-            observability::emit_tls_negotiation_completed(
+            observability::tls::emit_negotiation_start(encryption, tls_backend);
+            observability::tls::emit_negotiation_completed(
                 tls_start.elapsed(),
                 encryption,
                 tls_backend,

@@ -16,8 +16,8 @@ pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     match &config.trust {
         TrustConfig::CaCertificateLocation(path) => {
-            observability::emit_tls_trust_config(
-                observability::tls_backend_name(),
+            observability::tls::emit_trust_config(
+                observability::tls::backend_name(),
                 "ca_certificate",
                 true,
             );
@@ -48,8 +48,8 @@ pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
             }
         }
         TrustConfig::TrustAll => {
-            observability::emit_tls_trust_config(
-                observability::tls_backend_name(),
+            observability::tls::emit_trust_config(
+                observability::tls::backend_name(),
                 "trust_all",
                 false,
             );
@@ -59,8 +59,8 @@ pub(crate) async fn create_tls_stream<S: AsyncRead + AsyncWrite + Unpin + Send>(
             builder = builder.use_sni(false);
         }
         TrustConfig::Default => {
-            observability::emit_tls_trust_config(
-                observability::tls_backend_name(),
+            observability::tls::emit_trust_config(
+                observability::tls::backend_name(),
                 "default",
                 true,
             );
