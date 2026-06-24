@@ -6,7 +6,7 @@
 //! name remains `tiberius` for compatibility with upstream Tiberius users:
 //!
 //! ```toml
-//! tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.12" }
+//! tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.14" }
 //! ```
 //!
 //! The fork keeps upstream query, authentication, TLS, and connection behavior

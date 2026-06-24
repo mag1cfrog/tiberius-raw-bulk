@@ -24,7 +24,7 @@ remains `tiberius` for upstream compatibility:
 
 ```toml
 [dependencies]
-tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.13" }
+tiberius = { package = "tiberius-raw-bulk", version = "0.12.3-raw-bulk.14" }
 ```
 
 Default features enable TDS 7.3, Windows authentication support, and
