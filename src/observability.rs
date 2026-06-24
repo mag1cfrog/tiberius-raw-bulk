@@ -22,6 +22,7 @@ use std::time::Duration;
 pub(crate) mod bulk_load;
 pub(crate) mod connection;
 pub(crate) mod login;
+pub(crate) mod sql_browser;
 pub(crate) mod tls;
 pub(crate) mod token;
 
@@ -170,6 +171,20 @@ pub(crate) mod event {
 
     /// SSPI token decoded.
     pub(crate) const TOKEN_SSPI: &str = "protocol.token.sspi";
+
+    /// SQL Browser resolution started.
+    pub(crate) const SQL_BROWSER_RESOLUTION_START: &str = "protocol.sql_browser.resolution.start";
+
+    /// SQL Browser resolution completed.
+    pub(crate) const SQL_BROWSER_RESOLUTION_COMPLETED: &str =
+        "protocol.sql_browser.resolution.completed";
+
+    /// SQL Browser resolution timed out.
+    pub(crate) const SQL_BROWSER_RESOLUTION_TIMEOUT: &str =
+        "protocol.sql_browser.resolution.timeout";
+
+    /// SQL Browser resolution failed.
+    pub(crate) const SQL_BROWSER_RESOLUTION_FAILED: &str = "protocol.sql_browser.resolution.failed";
 
     /// Smoke event used to validate the observability contract helper.
     pub(crate) const SMOKE: &str = "protocol.smoke";
