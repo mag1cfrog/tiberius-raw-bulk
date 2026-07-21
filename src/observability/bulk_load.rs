@@ -277,6 +277,50 @@ pub(crate) fn request_span(column_count: u64, packet_payload_limit_bytes: u64) -
     )
 }
 
+/// Creates the span that prepares the final bulk-load packet.
+pub(crate) fn finalize_prepare_span() -> Span {
+    tracing::span!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        span::BULK_LOAD_FINALIZE_PREPARE,
+        phase = "bulk_load",
+        operation = "finalize_prepare",
+    )
+}
+
+/// Creates the span that writes the final bulk-load packet.
+pub(crate) fn finalize_write_span() -> Span {
+    tracing::span!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        span::BULK_LOAD_FINALIZE_WRITE,
+        phase = "bulk_load",
+        operation = "finalize_write",
+    )
+}
+
+/// Creates the span that flushes the finalized bulk-load request.
+pub(crate) fn finalize_flush_span() -> Span {
+    tracing::span!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        span::BULK_LOAD_FINALIZE_FLUSH,
+        phase = "bulk_load",
+        operation = "finalize_flush",
+    )
+}
+
+/// Creates the span that waits for the SQL Server bulk-load result.
+pub(crate) fn finalize_result_span() -> Span {
+    tracing::span!(
+        target: target::PROTOCOL,
+        Level::INFO,
+        span::BULK_LOAD_FINALIZE_RESULT,
+        phase = "bulk_load",
+        operation = "finalize_result",
+    )
+}
+
 /// Emits the stable bulk-load request start event.
 pub(crate) fn emit_request_start(
     column_count: u64,
@@ -488,7 +532,7 @@ fn protocol_path(direct_packet_writes: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::{
-        observability::{event, field, span, test_support},
+        observability::{event, field, span, target, test_support},
         Error,
     };
     use std::{borrow::Cow, time::Duration};
@@ -674,6 +718,38 @@ mod tests {
             Some(span::BULK_LOAD_REQUEST),
             packet.parent_span_name.as_deref()
         );
+    }
+
+    #[test]
+    fn finalization_spans_preserve_the_active_caller() {
+        let (_output, records) = test_support::capture(|| {
+            let caller = tracing::span!(Level::INFO, "caller.finalize");
+            let _caller_entered = caller.enter();
+
+            drop(finalize_prepare_span());
+            drop(finalize_write_span());
+            drop(finalize_flush_span());
+            drop(finalize_result_span());
+        });
+
+        for (name, operation) in [
+            (span::BULK_LOAD_FINALIZE_PREPARE, "finalize_prepare"),
+            (span::BULK_LOAD_FINALIZE_WRITE, "finalize_write"),
+            (span::BULK_LOAD_FINALIZE_FLUSH, "finalize_flush"),
+            (span::BULK_LOAD_FINALIZE_RESULT, "finalize_result"),
+        ] {
+            let captured = records
+                .span(name)
+                .unwrap_or_else(|| panic!("missing finalization span `{name}` in {records:?}"));
+            assert_eq!(target::PROTOCOL, captured.target);
+            assert_eq!(Level::INFO, captured.level);
+            assert_eq!(
+                Some("caller.finalize"),
+                captured.parent_span_name.as_deref()
+            );
+            captured.assert_field("phase", "bulk_load");
+            captured.assert_field("operation", operation);
+        }
     }
 
     #[test]

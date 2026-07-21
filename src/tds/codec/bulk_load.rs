@@ -5,6 +5,7 @@ use futures_util::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "bulk-load-profile")]
 use std::time::Duration;
 use std::time::Instant;
+use tracing::Instrument;
 
 #[cfg(feature = "bulk-load-profile")]
 use crate::client::{DirectPacketPollWriteSummary, DirectPacketWriteTiming};
@@ -865,8 +866,12 @@ where
     pub async fn finalize(mut self) -> crate::Result<ExecuteResult> {
         let request_start = Instant::now();
         let result = async {
-            TokenDone::default().encode(&mut self.buf)?;
-            self.write_packets().await?;
+            async {
+                TokenDone::default().encode(&mut self.buf)?;
+                self.write_packets().await
+            }
+            .instrument(observability::bulk_load::finalize_prepare_span())
+            .await?;
 
             let data = self.buf.split();
             let data_len = if self.direct_packet_writes {
@@ -881,11 +886,17 @@ where
                 header.set_status(PacketStatus::EndOfMessage);
                 let mut header_buf = &mut data[..HEADER_BYTES];
                 header.encode_for_payload(data_len, &mut header_buf)?;
-                self.connection.write_direct_packet_buffer(&data).await?;
+                self.connection
+                    .write_direct_packet_buffer(&data)
+                    .instrument(observability::bulk_load::finalize_write_span())
+                    .await?;
             } else {
                 let mut header = PacketHeader::bulk_load(self.packet_id);
                 header.set_status(PacketStatus::EndOfMessage);
-                self.connection.write_to_wire(header, data).await?;
+                self.connection
+                    .write_to_wire(header, data)
+                    .instrument(observability::bulk_load::finalize_write_span())
+                    .await?;
             }
 
             self.trace.record_packet_written(
@@ -895,7 +906,11 @@ where
             );
 
             let flush_start = Instant::now();
-            let flush_result = self.connection.flush_sink().await;
+            let flush_result = self
+                .connection
+                .flush_sink()
+                .instrument(observability::bulk_load::finalize_flush_span())
+                .await;
             let flush_elapsed = flush_start.elapsed();
             match &flush_result {
                 Ok(_) => self.trace.emit_flush_completed(flush_elapsed),
@@ -903,7 +918,9 @@ where
             }
             flush_result?;
 
-            ExecuteResult::new(self.connection).await
+            ExecuteResult::new(self.connection)
+                .instrument(observability::bulk_load::finalize_result_span())
+                .await
         }
         .await;
 
@@ -943,8 +960,12 @@ where
     pub async fn finalize_with_stats(mut self) -> crate::Result<(ExecuteResult, BulkLoadStats)> {
         let finalize_start = Instant::now();
         let result = async {
-            TokenDone::default().encode(&mut self.buf)?;
-            self.write_packets().await?;
+            async {
+                TokenDone::default().encode(&mut self.buf)?;
+                self.write_packets().await
+            }
+            .instrument(observability::bulk_load::finalize_prepare_span())
+            .await?;
 
             let data = self.buf.split();
             let data_len = if self.direct_packet_writes {
@@ -964,6 +985,7 @@ where
                 let write_result = self
                     .connection
                     .write_direct_packet_buffer_with_timing(&data)
+                    .instrument(observability::bulk_load::finalize_write_span())
                     .await;
                 let write_elapsed = write_start.elapsed();
                 self.write_timing_stats
@@ -983,6 +1005,7 @@ where
                 let write_result = self
                     .connection
                     .write_to_wire_with_timing(header, data)
+                    .instrument(observability::bulk_load::finalize_write_span())
                     .await;
                 let write_elapsed = write_start.elapsed();
                 self.write_timing_stats
@@ -1009,7 +1032,11 @@ where
             );
 
             let flush_start = Instant::now();
-            let flush_result = self.connection.flush_sink().await;
+            let flush_result = self
+                .connection
+                .flush_sink()
+                .instrument(observability::bulk_load::finalize_flush_span())
+                .await;
             let flush_elapsed = flush_start.elapsed();
             self.write_timing_stats.record_flush(flush_elapsed);
             self.write_timing_stats
@@ -1021,7 +1048,9 @@ where
             flush_result?;
 
             let result_start = Instant::now();
-            let result = ExecuteResult::new(self.connection).await?;
+            let result = ExecuteResult::new(self.connection)
+                .instrument(observability::bulk_load::finalize_result_span())
+                .await?;
             self.write_timing_stats
                 .record_finalize_result_elapsed(result_start.elapsed());
 

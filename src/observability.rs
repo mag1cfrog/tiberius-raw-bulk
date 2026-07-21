@@ -52,6 +52,18 @@ pub(crate) mod span {
     /// Bulk-load request span.
     pub(crate) const BULK_LOAD_REQUEST: &str = "protocol.bulk_load.request";
 
+    /// Preparation of the final bulk-load packet.
+    pub(crate) const BULK_LOAD_FINALIZE_PREPARE: &str = "protocol.bulk_load.finalize.prepare";
+
+    /// Write of the final bulk-load packet.
+    pub(crate) const BULK_LOAD_FINALIZE_WRITE: &str = "protocol.bulk_load.finalize.write";
+
+    /// Final bulk-load connection flush.
+    pub(crate) const BULK_LOAD_FINALIZE_FLUSH: &str = "protocol.bulk_load.finalize.flush";
+
+    /// Wait for the SQL Server bulk-load result.
+    pub(crate) const BULK_LOAD_FINALIZE_RESULT: &str = "protocol.bulk_load.finalize.result";
+
     /// Smoke span used to validate the observability contract helper.
     pub(crate) const SMOKE: &str = "protocol.smoke";
 }
