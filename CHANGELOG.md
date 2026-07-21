@@ -1,5 +1,10 @@
 # Changes
 
+## Version 0.12.3-raw-bulk.15
+
+- Add exact wall-clock spans for final bulk-load packet preparation, packet
+  write, connection flush, and SQL Server result wait operations.
+
 ## Version 0.12.3-raw-bulk.14
 
 - Add a stable, sanitized protocol tracing contract for client and TDS
