@@ -263,14 +263,14 @@ jobs:
         uses: actions/cache@v5
         with:
           path: C:\Users\runneradmin\AppData\Local\Temp\openssl-installer\
-          key: win64-openssl-3.5.7-installer
+          key: win64-openssl-3.5.8-installer
 
       - name: Setup OpenSSL install cache
         id: opensslinstallcache
         uses: actions/cache@v5
         with:
-          path: C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.7\
-          key: win64-openssl-3.5.7-install-v1
+          path: C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.8\
+          key: win64-openssl-3.5.8-install-v1
 
       - name: Fetch dependencies
         shell: powershell
@@ -288,9 +288,9 @@ jobs:
         shell: powershell
         run: |
           $installerDir = "C:\Users\runneradmin\AppData\Local\Temp\openssl-installer"
-          $installer = Join-Path $installerDir "Win64OpenSSL-3_5_7.exe"
-          $installerUrl = "https://slproweb.com/download/Win64OpenSSL-3_5_7.exe"
-          $opensslDir = "C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.7"
+          $installer = Join-Path $installerDir "Win64OpenSSL-3_5_8.exe"
+          $installerUrl = "https://slproweb.com/download/Win64OpenSSL-3_5_8.exe"
+          $opensslDir = "C:\Users\runneradmin\AppData\Local\OpenSSL-Win64-3.5.8"
 
           $includeDir = Join-Path $opensslDir "include"
           $libDir = @(
